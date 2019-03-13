@@ -94,11 +94,17 @@ deps['dev'] = (
 
 install_requires = deps['trinity'] + deps['p2p'] + deps['eth2']
 
-if os.environ.get('READTHEDOCS', False):
+rtd_build_env = os.environ.get('READTHEDOCS', False)
+docker_build_env = os.environ.get('DOCKER', False)
+
+if rtd_build_env or docker_build_env:
     # in readthedocs environment, install some relevant c libraries
     import subprocess
     print("Installing snappy C library for the ReadTheDocs build...")
-    subprocess.run(['apt-get', 'install', 'libsnappy-dev'], check=True)
+    apt_update = 'apt-get update'
+    apt_install_snappy = 'apt-get install -y libsnappy-dev'
+    subprocess.run(apt_update.split(' '), check=True)
+    subprocess.run(apt_install_snappy.split(' '), check=True)
     print("Finished installing snappy C library")
 
 setup(

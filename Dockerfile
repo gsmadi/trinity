@@ -5,6 +5,9 @@ WORKDIR /usr/src/app
 
 COPY . /usr/src/app
 
+# Set build env var to install dependencies from setup.py
+ENV DOCKER=1
+
 RUN pip install -e .[dev]  --no-cache-dir
 RUN pip install -U trinity --no-cache-dir
 
