@@ -101,8 +101,8 @@ if rtd_build_env or docker_build_env:
     # in readthedocs environment, install some relevant c libraries
     import subprocess
     print("Installing snappy C library for the ReadTheDocs build...")
-    apt_update = 'apt-get update'
-    apt_install_snappy = 'apt-get install -y libsnappy-dev'
+    apt_update = 'sudo apt-get update'
+    apt_install_snappy = 'sudo apt-get install -y libsnappy-dev'
     subprocess.run(apt_update.split(' '), check=True)
     subprocess.run(apt_install_snappy.split(' '), check=True)
     print("Finished installing snappy C library")
