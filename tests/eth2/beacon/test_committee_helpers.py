@@ -1,5 +1,7 @@
-import pytest
+import time
+
 import itertools
+import pytest
 
 from eth_utils import (
     ValidationError,
@@ -77,7 +79,8 @@ def test_get_next_epoch_committee_count(n_validators_state,
                                         shard_count,
                                         slots_per_epoch,
                                         target_committee_size,
-                                        expected_committee_count):
+                                        expected_committee_count,
+                                        config):
     state = n_validators_state
 
     current_epoch_committee_count = get_current_epoch_committee_count(
@@ -96,11 +99,12 @@ def test_get_next_epoch_committee_count(n_validators_state,
     assert next_epoch_committee_count == expected_committee_count
 
     # Exit all validators
+    exit_epoch = state.current_epoch(slots_per_epoch) + 1
     for index, validator in enumerate(state.validator_registry):
         state = state.update_validator_registry(
             validator_index=index,
             validator=validator.copy(
-                exit_epoch=state.current_epoch(slots_per_epoch) + 1,
+                exit_epoch=exit_epoch,
             ),
         )
 
@@ -122,6 +126,14 @@ def test_get_next_epoch_committee_count(n_validators_state,
 
 @pytest.mark.parametrize(
     (
+        'genesis_slot,'
+    ),
+    [
+        (0),
+    ],
+)
+@pytest.mark.parametrize(
+    (
         'num_validators,'
         'slots_per_epoch,'
         'target_committee_size,'
@@ -140,15 +152,13 @@ def test_get_next_epoch_committee_count(n_validators_state,
 def test_get_shuffling_is_complete(activated_genesis_validators,
                                    slots_per_epoch,
                                    target_committee_size,
-                                   shard_count,
+                                   committee_config,
                                    epoch):
     shuffling = get_shuffling(
         seed=b'\x35' * 32,
         validators=activated_genesis_validators,
         epoch=epoch,
-        slots_per_epoch=slots_per_epoch,
-        target_committee_size=target_committee_size,
-        shard_count=shard_count,
+        committee_config=committee_config,
     )
 
     assert len(shuffling) == slots_per_epoch
@@ -171,6 +181,51 @@ def test_get_shuffling_is_complete(activated_genesis_validators,
         for index in range(len(activated_genesis_validators))
     )
     assert sorted(validator_indices) == sorted(activated_genesis_validator_indices)
+
+
+@pytest.mark.parametrize(
+    (
+        'genesis_slot,'
+    ),
+    [
+        (0),
+    ],
+)
+@pytest.mark.parametrize(
+    (
+        'num_validators,'
+        'slots_per_epoch,'
+        'target_committee_size,'
+        'shard_count,'
+        'epoch'
+    ),
+    [
+        (1000, 20, 10, 100, 0),
+
+    ],
+)
+def test_get_shuffling_cache(activated_genesis_validators,
+                             committee_config,
+                             epoch):
+    start_time = time.time()
+    get_shuffling(
+        seed=b'\x55' * 32,
+        validators=activated_genesis_validators,
+        epoch=epoch,
+        committee_config=committee_config,
+    )
+    one_shuffle_time = time.time() - start_time
+
+    start_time = time.time()
+    for _ in range(100):
+        get_shuffling(
+            seed=b'\x66' * 32,
+            validators=activated_genesis_validators,
+            epoch=epoch,
+            committee_config=committee_config,
+        )
+    one_hundred_shuffles_time = time.time() - start_time
+    assert one_hundred_shuffles_time < one_shuffle_time * 2
 
 
 @pytest.mark.parametrize(
@@ -270,39 +325,62 @@ def test_get_prev_or_cur_epoch_committee_count(
 
 @pytest.mark.parametrize(
     (
+        'genesis_slot,'
+        'genesis_epoch,'
+    ),
+    [
+        (0, 0),
+    ],
+)
+@pytest.mark.parametrize(
+    (
         'n,'
         'current_slot,'
         'slot,'
         'slots_per_epoch,'
         'target_committee_size,'
         'shard_count,'
-        'registry_change,'
 
+        'registry_change,'
         'should_reseed,'
+
         'previous_shuffling_epoch,'
         'current_shuffling_epoch,'
         'shuffling_epoch,'
     ),
     [
-        # genesis_epoch == previous_epoch == slot_to_epoch(slot) == current_epoch
+        #
+        # epoch == current_epoch
+        #
+        # (1) genesis_epoch == previous_epoch == slot_to_epoch(slot) == current_epoch
         (10, 0, 5, 10, 2, 3, False, False, 0, 0, 0),
-        # genesis_epoch == previous_epoch == slot_to_epoch(slot) < current_epoch
-        (10, 10, 5, 10, 2, 3, False, False, 0, 1, 0),
-        # genesis_epoch < previous_epoch == slot_to_epoch(slot) < current_epoch
-        (10, 20, 11, 10, 2, 3, False, False, 1, 2, 1),
-        # genesis_epoch == previous_epoch < slot_to_epoch(slot) == current_epoch
+        # (2) genesis_epoch == previous_epoch < slot_to_epoch(slot) == current_epoch
         (10, 10, 11, 10, 2, 3, False, False, 0, 1, 1,),
-        # genesis_epoch == previous_epoch < slot_to_epoch(slot) == next_epoch
+
+        #
+        # epoch == previous_epoch
+        #
+        # (1) genesis_epoch == previous_epoch == slot_to_epoch(slot) < current_epoch
+        (10, 10, 5, 10, 2, 3, False, False, 0, 1, 0),
+        # (2) genesis_epoch < previous_epoch == slot_to_epoch(slot) < current_epoch
+        (10, 20, 11, 10, 2, 3, False, False, 1, 2, 1),
+
+
+        #
+        # epoch == next_epoch
+        #
+        # (1) genesis_epoch == previous_epoch < slot_to_epoch(slot) == next_epoch
         (100, 4, 9, 4, 2, 3, False, False, 0, 1, 2),
-        # genesis_epoch == previous_epoch < slot_to_epoch(slot) == next_epoch
+        # (2) genesis_epoch == previous_epoch < slot_to_epoch(slot) == next_epoch, registry_change
         (100, 4, 9, 4, 2, 3, True, False, 0, 1, 2),
-        # genesis_epoch == previous_epoch < slot_to_epoch(slot) == next_epoch, need_reseed
+        # (3) genesis_epoch == previous_epoch < slot_to_epoch(slot) == next_epoch, need_reseed
         # epochs_since_last_registry_update > 1 and is_power_of_two(epochs_since_last_registry_update)  # noqa: E501
         (100, 8, 13, 4, 2, 3, False, True, 1, 2, 3),
     ],
 )
 def test_get_crosslink_committees_at_slot(
         monkeypatch,
+        genesis_slot,
         n_validators_state,
         current_slot,
         slot,
@@ -359,24 +437,36 @@ def test_get_crosslink_committees_at_slot(
     offset = slot % slots_per_epoch
 
     result_slot_start_shard = crosslink_committees_at_slot[0][1]
+
     current_committees_per_epoch = get_current_epoch_committee_count(
         state=state,
         shard_count=shard_count,
         slots_per_epoch=slots_per_epoch,
         target_committee_size=target_committee_size,
     )
-    committees_per_slot = current_committees_per_epoch // slots_per_epoch
 
     if registry_change:
+        committees_per_epoch = current_committees_per_epoch
         shuffling_start_shard = (
             state.current_shuffling_start_shard + current_committees_per_epoch
         ) % shard_count
-    else:
+    elif should_reseed:
+        committees_per_epoch = get_next_epoch_committee_count(
+            state=state,
+            shard_count=shard_count,
+            slots_per_epoch=slots_per_epoch,
+            target_committee_size=target_committee_size,
+        )
         shuffling_start_shard = state.current_shuffling_start_shard
-        assert result_slot_start_shard == (
-            shuffling_start_shard +
-            committees_per_slot * offset
-        ) % shard_count
+    else:
+        committees_per_epoch = current_committees_per_epoch
+        shuffling_start_shard = state.current_shuffling_start_shard
+
+    committees_per_slot = committees_per_epoch // slots_per_epoch
+    assert result_slot_start_shard == (
+        shuffling_start_shard +
+        committees_per_slot * offset
+    ) % shard_count
 
     #
     # Check seed
@@ -400,13 +490,29 @@ def test_get_crosslink_committees_at_slot(
         seed=seed,
         validators=state.validator_registry,
         epoch=shuffling_epoch,
-        slots_per_epoch=slots_per_epoch,
-        target_committee_size=target_committee_size,
-        shard_count=shard_count,
+        committee_config=committee_config,
     )
     assert shuffling[committees_per_slot * offset] == crosslink_committees_at_slot[0][0]
 
 
+@pytest.mark.parametrize(
+    (
+        'registry_change'
+    ),
+    [
+        (True),
+        (False)
+    ]
+)
+@pytest.mark.parametrize(
+    (
+        'genesis_slot,'
+        'genesis_epoch,'
+    ),
+    [
+        (0, 0),
+    ],
+)
 @pytest.mark.parametrize(
     (
         'num_validators,'
@@ -438,6 +544,7 @@ def test_get_beacon_proposer_index(
         slots_per_epoch,
         committee,
         slot,
+        registry_change,
         success,
         sample_state,
         genesis_epoch,
@@ -449,7 +556,8 @@ def test_get_beacon_proposer_index(
 
     def mock_get_crosslink_committees_at_slot(state,
                                               slot,
-                                              committee_config):
+                                              committee_config,
+                                              registry_change=False):
         return (
             (committee, 1,),
         )
@@ -464,6 +572,7 @@ def test_get_beacon_proposer_index(
             sample_state,
             slot,
             committee_config,
+            registry_change=registry_change,
         )
         assert proposer_index == committee[slot % len(committee)]
     else:
@@ -472,6 +581,7 @@ def test_get_beacon_proposer_index(
                 sample_state,
                 slot,
                 committee_config,
+                registry_change=registry_change,
             )
 
 
@@ -495,14 +605,14 @@ def test_get_beacon_proposer_index(
             100,
             64,
             (10, 11, 12),
-            b'\x80',
+            b'\x01',
             (10,),
         ),
         (
             100,
             64,
             (10, 11, 12),
-            b'\xc0',
+            b'\x03',
             (10, 11),
         ),
         (
@@ -533,7 +643,8 @@ def test_get_attestation_participants(
 
     def mock_get_crosslink_committees_at_slot(state,
                                               slot,
-                                              committee_config):
+                                              committee_config,
+                                              registry_change=False):
         return (
             (committee, shard,),
         )

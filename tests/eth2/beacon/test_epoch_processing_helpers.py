@@ -10,10 +10,6 @@ from hypothesis import (
     strategies as st,
 )
 
-from eth_utils import (
-    big_endian_to_int,
-)
-
 from eth2._utils.bitfield import (
     set_voted,
     get_empty_bitfield,
@@ -75,6 +71,14 @@ def get_aggregation_bitfield(attestation_participants, target_committee_size):
 
 @settings(max_examples=1)
 @given(random=st.randoms())
+@pytest.mark.parametrize(
+    (
+        'genesis_slot,'
+    ),
+    [
+        (0),
+    ]
+)
 def test_get_current_and_previous_epoch_attestations(random,
                                                      sample_state,
                                                      genesis_epoch,
@@ -127,10 +131,10 @@ def test_get_current_and_previous_epoch_attestations(random,
 @given(random=st.randoms())
 @pytest.mark.parametrize(
     (
-        'slots_per_epoch,latest_block_roots_length,'
+        'slots_per_epoch,latest_block_roots_length,genesis_slot'
     ),
     [
-        (10, 100),
+        (10, 100, 0),
     ]
 )
 def test_get_previous_epoch_head_attestations(
@@ -145,7 +149,7 @@ def test_get_previous_epoch_head_attestations(
     current_epoch = previous_epoch + 1
     current_slot = get_epoch_start_slot(current_epoch + 1, slots_per_epoch) - 1
     latest_block_roots = [
-        hash_eth2(b'block_root' + i.to_bytes(1, 'big'))
+        hash_eth2(b'block_root' + i.to_bytes(1, 'little'))
         for i in range(latest_block_roots_length)
     ]
 
@@ -248,7 +252,8 @@ def test_get_winning_root(
 
     def mock_get_crosslink_committees_at_slot(state,
                                               slot,
-                                              committee_config):
+                                              committee_config,
+                                              registry_change=False):
         return (
             (committee, shard,),
         )
@@ -277,19 +282,19 @@ def test_get_winning_root(
     attestations = (
         # Attestation to `crosslink_data_root_1` by `attestation_participants_1`
         Attestation(**sample_attestation_params).copy(
+            aggregation_bitfield=root_1_participants_bitfield,
             data=AttestationData(**sample_attestation_data_params).copy(
                 shard=shard,
                 crosslink_data_root=competing_block_roots[0],
             ),
-            aggregation_bitfield=root_1_participants_bitfield
         ),
         # Attestation to `crosslink_data_root_2` by `attestation_participants_2`
         Attestation(**sample_attestation_params).copy(
+            aggregation_bitfield=root_2_participants_bitfield,
             data=AttestationData(**sample_attestation_data_params).copy(
                 shard=shard,
                 crosslink_data_root=competing_block_roots[1],
             ),
-            aggregation_bitfield=root_2_participants_bitfield
         ),
     )
 
@@ -320,9 +325,7 @@ def test_get_winning_root(
         assert len(block_root_1_participants) == 0 and len(block_root_2_participants) == 0
     else:
         if len(block_root_1_participants) == len(block_root_2_participants):
-            root_1_as_int = big_endian_to_int(competing_block_roots[0])
-            root_2_as_int = big_endian_to_int(competing_block_roots[1])
-            if root_1_as_int < root_2_as_int:
+            if competing_block_roots[0] < competing_block_roots[1]:
                 assert winning_root == competing_block_roots[0]
             else:
                 assert winning_root == competing_block_roots[1]
@@ -347,7 +350,8 @@ def test_get_epoch_boundary_attester_indices(monkeypatch,
 
     def mock_get_crosslink_committees_at_slot(state,
                                               slot,
-                                              committee_config):
+                                              committee_config,
+                                              registry_change=False):
         return (
             (committee, sample_attestation_data_params['shard'],),
         )
@@ -384,27 +388,27 @@ def test_get_epoch_boundary_attester_indices(monkeypatch,
     attestations = [
         # Attestation to `block_root_1` by `attestation_participants_1`
         Attestation(**sample_attestation_params).copy(
+            aggregation_bitfield=aggregation_bitfield_1,
             data=AttestationData(**sample_attestation_data_params).copy(
                 justified_epoch=1,
                 epoch_boundary_root=block_root_1,
             ),
-            aggregation_bitfield=aggregation_bitfield_1
         ),
         # Attestation to `block_root_1` by `attestation_participants_2`
         Attestation(**sample_attestation_params).copy(
+            aggregation_bitfield=aggregation_bitfield_2,
             data=AttestationData(**sample_attestation_data_params).copy(
                 justified_epoch=1,
                 epoch_boundary_root=block_root_1,
             ),
-            aggregation_bitfield=aggregation_bitfield_2
         ),
         # Attestation to `block_root_2` by `not_attestation_participants_1`
         Attestation(**sample_attestation_params).copy(
+            aggregation_bitfield=not_aggregation_bitfield_1,
             data=AttestationData(**sample_attestation_data_params).copy(
                 justified_epoch=2,
                 epoch_boundary_root=block_root_2,
             ),
-            aggregation_bitfield=not_aggregation_bitfield_1
         ),
     ]
 
@@ -437,8 +441,16 @@ def test_get_epoch_boundary_attester_indices(monkeypatch,
 @settings(max_examples=1)
 @given(random=st.randoms())
 @pytest.mark.parametrize(
-    "n,",
-    (16,),
+    (
+        'n,'
+        'genesis_slot,'
+    ),
+    [
+        (
+            16,
+            0,
+        ),
+    ]
 )
 def test_get_epoch_boundary_attesting_balances(
     monkeypatch,
@@ -462,7 +474,8 @@ def test_get_epoch_boundary_attesting_balances(
 
     def mock_get_crosslink_committees_at_slot(state,
                                               slot,
-                                              committee_config):
+                                              committee_config,
+                                              registry_change=False):
         return (
             (committee, sample_attestation_data_params['shard'],),
         )
@@ -496,40 +509,40 @@ def test_get_epoch_boundary_attesting_balances(
 
     current_epoch_attestations = (
         Attestation(**sample_attestation_params).copy(
+            aggregation_bitfield=aggregation_bitfield_1,
             data=AttestationData(**sample_attestation_data_params).copy(
                 slot=194,
                 justified_epoch=2,
                 epoch_boundary_root=current_epoch_boundary_root,
             ),
-            aggregation_bitfield=aggregation_bitfield_1
         ),
         Attestation(**sample_attestation_params).copy(
+            aggregation_bitfield=aggregation_bitfield_2,
             data=AttestationData(**sample_attestation_data_params).copy(
                 slot=193,
                 justified_epoch=2,
                 epoch_boundary_root=current_epoch_boundary_root,
             ),
-            aggregation_bitfield=aggregation_bitfield_2
         ),
 
     )
 
     previous_epoch_attestations = (
         Attestation(**sample_attestation_params).copy(
+            aggregation_bitfield=aggregation_bitfield_1,
             data=AttestationData(**sample_attestation_data_params).copy(
                 slot=129,
                 justified_epoch=previous_justified_epoch,
                 epoch_boundary_root=previous_epoch_boundary_root,
             ),
-            aggregation_bitfield=aggregation_bitfield_1
         ),
         Attestation(**sample_attestation_params).copy(
+            aggregation_bitfield=aggregation_bitfield_2,
             data=AttestationData(**sample_attestation_data_params).copy(
                 slot=130,
                 justified_epoch=previous_justified_epoch,
                 epoch_boundary_root=previous_epoch_boundary_root,
             ),
-            aggregation_bitfield=aggregation_bitfield_2
         ),
     )
 
@@ -597,7 +610,8 @@ def test_get_inclusion_infos(
 
     def mock_get_crosslink_committees_at_slot(state,
                                               slot,
-                                              committee_config):
+                                              committee_config,
+                                              registry_change=False):
         return (
             (committee, shard,),
         )

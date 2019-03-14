@@ -25,19 +25,6 @@ def test_defaults(sample_slashable_attestation_params):
     assert ssz.encode(slashable_attestation)
 
 
-def test_hash(sample_slashable_attestation_params):
-    slashable_attestation = SlashableAttestation(**sample_slashable_attestation_params)
-
-    # NOTE: this hash was simply copied from the existing implementation
-    # which should be the keccak-256 of the rlp serialization of `votes`.
-    # Given that this value will change soon (cf. ssz tree hash), we just
-    # do this to get the test passing for now and will need to update later
-    # if we expect the hash computation is not working correctly
-    hash_hex = "8cba2c190eae977ba16cbcc7ef1b95b32384fd12e86292ca8a91cc320eaeac9c"
-
-    assert slashable_attestation.hash == bytes.fromhex(hash_hex)
-
-
 def test_root(sample_slashable_attestation_params):
     slashable_attestation = SlashableAttestation(**sample_slashable_attestation_params)
 
@@ -74,8 +61,8 @@ def test_is_validator_indices_ascending(
         'custody_bit_indices'
     ),
     [
-        ((0, 1, 2), b'\x80', ((1, 2), (0,))),
-        ((0, 1, 2), b'\xC0', ((2,), (0, 1))),
+        ((0, 1, 2), b'\x01', ((1, 2), (0,))),
+        ((0, 1, 2), b'\x03', ((2,), (0, 1))),
     ],
 )
 def test_custody_bit_indices(

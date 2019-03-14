@@ -4,6 +4,12 @@ from eth_utils import (
     ValidationError,
 )
 
+from eth2.beacon.committee_helpers import (
+    get_beacon_proposer_index,
+)
+from eth2.beacon.configs import (
+    CommitteeConfig,
+)
 from eth2.beacon.types.blocks import (
     BeaconBlockBody,
 )
@@ -14,11 +20,13 @@ from eth2.beacon.state_machines.forks.serenity.operation_processing import (
     process_attestations,
     process_proposer_slashings,
     process_attester_slashings,
+    process_voluntary_exits,
 )
 from eth2.beacon.tools.builder.validator import (
     create_mock_attester_slashing_is_double_vote,
     create_mock_signed_attestations_at_slot,
     create_mock_proposer_slashing_at_block,
+    create_mock_voluntary_exit,
 )
 
 
@@ -28,7 +36,7 @@ def test_process_max_attestations(genesis_state,
                                   sample_beacon_block_body_params,
                                   config,
                                   keymap):
-    attestation_slot = 0
+    attestation_slot = config.GENESIS_SLOT
     current_slot = attestation_slot + config.MIN_ATTESTATION_INCLUSION_DELAY
     state = genesis_state.copy(
         slot=current_slot,
@@ -85,19 +93,23 @@ def test_process_proposer_slashings(genesis_state,
                                     block_root_1,
                                     block_root_2,
                                     success):
-    current_slot = 1
+    current_slot = config.GENESIS_SLOT + 1
     state = genesis_state.copy(
         slot=current_slot,
     )
-
-    proposer_index = 0
+    whistleblower_index = get_beacon_proposer_index(
+        state,
+        state.slot,
+        CommitteeConfig(config),
+    )
+    slashing_proposer_index = (whistleblower_index + 1) % len(state.validator_registry)
     proposer_slashing = create_mock_proposer_slashing_at_block(
         state,
         config,
         keymap,
         block_root_1=block_root_1,
         block_root_2=block_root_2,
-        proposer_index=proposer_index,
+        proposer_index=slashing_proposer_index,
     )
     proposer_slashings = (proposer_slashing,)
 
@@ -117,7 +129,8 @@ def test_process_proposer_slashings(genesis_state,
         )
         # Check if slashed
         assert (
-            new_state.validator_balances[proposer_index] < state.validator_balances[proposer_index]
+            new_state.validator_balances[slashing_proposer_index] <
+            state.validator_balances[slashing_proposer_index]
         )
     else:
         with pytest.raises(ValidationError):
@@ -217,11 +230,12 @@ def test_process_attester_slashings(genesis_state,
         'target_committee_size,'
         'shard_count,'
         'success,'
+        'genesis_slot,'
     ),
     [
-        (10, 2, 1, 2, 2, True),
-        (10, 2, 1, 2, 2, False),
-        (40, 4, 2, 3, 5, True),
+        (10, 2, 1, 2, 2, True, 0),
+        (10, 2, 1, 2, 2, False, 0),
+        (40, 4, 2, 3, 5, True, 0),
     ]
 )
 def test_process_attestations(genesis_state,
@@ -278,6 +292,80 @@ def test_process_attestations(genesis_state,
     else:
         with pytest.raises(ValidationError):
             process_attestations(
+                state,
+                block,
+                config,
+            )
+
+
+@pytest.mark.parametrize(
+    (
+        'num_validators',
+        'slots_per_epoch',
+        'target_committee_size',
+        'activation_exit_delay',
+    ),
+    [
+        (40, 2, 2, 2),
+    ]
+)
+@pytest.mark.parametrize(
+    (
+        'success',
+    ),
+    [
+        (True,),
+        (False,),
+    ]
+)
+def test_process_voluntary_exits(genesis_state,
+                                 sample_beacon_block_params,
+                                 sample_beacon_block_body_params,
+                                 config,
+                                 keymap,
+                                 min_attestation_inclusion_delay,
+                                 success):
+    state = genesis_state
+    validator_index = 0
+    valid_voluntary_exit = create_mock_voluntary_exit(
+        state,
+        config,
+        keymap,
+        validator_index,
+    )
+
+    if success:
+        block_body = BeaconBlockBody(**sample_beacon_block_body_params).copy(
+            voluntary_exits=(valid_voluntary_exit,),
+        )
+        block = SerenityBeaconBlock(**sample_beacon_block_params).copy(
+            slot=state.slot,
+            body=block_body,
+        )
+
+        new_state = process_voluntary_exits(
+            state,
+            block,
+            config,
+        )
+        # Check if initiated exit
+        assert (
+            new_state.validator_registry[validator_index].initiated_exit
+        )
+    else:
+        invalid_voluntary_exit = valid_voluntary_exit.copy(
+            signature=b'\x12' * 96,  # Put wrong signature
+        )
+        block_body = BeaconBlockBody(**sample_beacon_block_body_params).copy(
+            voluntary_exits=(invalid_voluntary_exit,),
+        )
+        block = SerenityBeaconBlock(**sample_beacon_block_params).copy(
+            slot=state.slot,
+            body=block_body,
+        )
+
+        with pytest.raises(ValidationError):
+            process_voluntary_exits(
                 state,
                 block,
                 config,

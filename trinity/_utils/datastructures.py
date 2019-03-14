@@ -511,7 +511,13 @@ class OrderedTaskPreparation(Generic[TTask, TTaskID, TPrerequisite]):
             )
         self._tasks[task_id] = completed
         self._declared_finished.add(task_id)
-        self._roots.add(task_id, self._dependency_of(finished_task))
+
+        dependency_id = self._dependency_of(finished_task)
+        self._roots.add(task_id, dependency_id)
+        if dependency_id in self._tasks:
+            # set a finished dependency that has a parent already entered. Mark this as a dependency
+            self._dependencies[dependency_id].add(task_id)
+
         # note that this task is intentionally *not* added to self._unready
 
     def register_tasks(self, tasks: Tuple[TTask, ...], ignore_duplicates: bool = False) -> None:
@@ -546,7 +552,9 @@ class OrderedTaskPreparation(Generic[TTask, TTaskID, TPrerequisite]):
             if not self._accept_dangling_tasks and dependency_id not in self._tasks:
                 raise MissingDependency(
                     f"Cannot prepare task {prereq_tracker!r} with id {task_id} and "
-                    f"dependency {dependency_id} before preparing its dependency"
+                    f"dependency {dependency_id} before preparing its dependency "
+                    f"among tasks {task_meta_info!r}, from the original registration: "
+                    f"{tasks!r}."
                 )
             else:
                 self._tasks[task_id] = prereq_tracker

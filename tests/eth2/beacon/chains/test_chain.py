@@ -38,8 +38,8 @@ def valid_chain(beacon_chain_with_block_validation):
         (100, 20, 10, 10),
     ]
 )
-def test_canonical_chain(valid_chain):
-    genesis_block = valid_chain.get_canonical_block_by_slot(0)
+def test_canonical_chain(valid_chain, genesis_slot):
+    genesis_block = valid_chain.get_canonical_block_by_slot(genesis_slot)
 
     # Our chain fixture is created with only the genesis header, so initially that's the head of
     # the canonical chain.
@@ -62,6 +62,7 @@ def test_canonical_chain(valid_chain):
     assert result_block == block
 
 
+@pytest.mark.long
 @pytest.mark.parametrize(
     (
         'num_validators,slots_per_epoch,target_committee_size,shard_count'
@@ -78,7 +79,7 @@ def test_import_blocks(valid_chain,
     state = genesis_state
     blocks = (genesis_block,)
     valid_chain_2 = copy.deepcopy(valid_chain)
-    for i in range(3):
+    for _ in range(3):
         block = create_mock_block(
             state=state,
             config=config,

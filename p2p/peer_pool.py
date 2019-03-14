@@ -26,11 +26,13 @@ from eth_utils.toolz import (
 )
 from lahja import (
     Endpoint,
+    BroadcastConfig,
 )
 
 from p2p.constants import (
     DEFAULT_MAX_PEERS,
     DEFAULT_PEER_BOOT_TIMEOUT,
+    DISCOVERY_EVENTBUS_ENDPOINT,
     DISOVERY_INTERVAL,
     REQUEST_PEER_CANDIDATE_TIMEOUT,
 )
@@ -72,6 +74,9 @@ from p2p.service import (
 )
 
 
+TO_DISCOVERY_BROADCAST_CONFIG = BroadcastConfig(filter_endpoint=DISCOVERY_EVENTBUS_ENDPOINT)
+
+
 class BasePeerPool(BaseService, AsyncIterable[BasePeer]):
     """
     PeerPool maintains connections to up-to max_peers on a given network.
@@ -83,11 +88,14 @@ class BasePeerPool(BaseService, AsyncIterable[BasePeer]):
                  privkey: datatypes.PrivateKey,
                  context: BasePeerContext,
                  max_peers: int = DEFAULT_MAX_PEERS,
-                 peer_info: BasePeerInfo = NoopPeerInfo(),
+                 peer_info: BasePeerInfo = None,
                  token: CancelToken = None,
                  event_bus: Endpoint = None
                  ) -> None:
         super().__init__(token)
+
+        if peer_info is None:
+            peer_info = NoopPeerInfo()
 
         self.peer_info = peer_info
 
@@ -120,9 +128,10 @@ class BasePeerPool(BaseService, AsyncIterable[BasePeer]):
             if available_peer_slots > 0:
                 try:
                     response = await self.wait(
-                        # TODO: This should use a BroadcastConfig to send the request to discovery
-                        # only as soon as we have cut a new Lahja release.
-                        self.event_bus.request(PeerCandidatesRequest(available_peer_slots)),
+                        self.event_bus.request(
+                            PeerCandidatesRequest(available_peer_slots),
+                            TO_DISCOVERY_BROADCAST_CONFIG,
+                        ),
                         timeout=REQUEST_PEER_CANDIDATE_TIMEOUT
                     )
                 except TimeoutError:
@@ -135,9 +144,10 @@ class BasePeerPool(BaseService, AsyncIterable[BasePeer]):
                 if not len(self):
                     try:
                         response = await self.wait(
-                            # TODO: This should use a BroadcastConfig to send the request to
-                            # discovery only as soon as we have cut a new Lahja release.
-                            self.event_bus.request(RandomBootnodeRequest()),
+                            self.event_bus.request(
+                                RandomBootnodeRequest(),
+                                TO_DISCOVERY_BROADCAST_CONFIG
+                            ),
                             timeout=REQUEST_PEER_CANDIDATE_TIMEOUT
                         )
                     except TimeoutError:
@@ -346,6 +356,7 @@ class BasePeerPool(BaseService, AsyncIterable[BasePeer]):
                     "%s: uptime=%s, received_msgs=%d, most_received=%s(%d)",
                     peer, peer.uptime, peer.received_msgs_count,
                     most_received_type, count)
+                self.logger.debug("client_version_string='%s'", peer.client_version_string)
                 for line in peer.get_extra_stats():
                     self.logger.debug("    %s", line)
             self.logger.debug("== End peer details == ")

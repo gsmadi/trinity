@@ -38,8 +38,8 @@ from eth2.beacon.state_machines.forks.serenity.block_validation import (
     verify_slashable_attestation_signature,
 )
 from eth2.beacon.types.blocks import BeaconBlock
-from eth2.beacon.types.proposal_signed_data import (
-    ProposalSignedData,
+from eth2.beacon.types.proposal import (
+    Proposal,
 )
 from eth2.beacon.types.forks import Fork
 from eth2.beacon.types.slashable_attestations import SlashableAttestation
@@ -104,7 +104,7 @@ def test_validate_proposer_signature(
 
     state = BeaconState(**sample_beacon_state_params).copy(
         validator_registry=tuple(
-            mock_validator_record(proposer_pubkey)
+            mock_validator_record(proposer_pubkey, config)
             for _ in range(10)
         ),
         validator_balances=(max_deposit_amount,) * 10,
@@ -113,15 +113,15 @@ def test_validate_proposer_signature(
     default_block = BeaconBlock(**sample_beacon_block_params)
     empty_signature_block_root = default_block.block_without_signature_root
 
-    proposal_root = ProposalSignedData(
+    proposal_signed_root = Proposal(
         state.slot,
         beacon_chain_shard_number,
         empty_signature_block_root,
-    ).root
+    ).signed_root
 
     proposed_block = BeaconBlock(**sample_beacon_block_params).copy(
         signature=bls.sign(
-            message_hash=proposal_root,
+            message_hash=proposal_signed_root,
             privkey=proposer_privkey,
             domain=SignatureDomain.DOMAIN_PROPOSAL,
         ),
@@ -162,7 +162,7 @@ def test_randao_reveal_validation(is_valid,
                                   pubkeys,
                                   sample_fork_params,
                                   config):
-    message_hash = epoch.to_bytes(32, byteorder="big")
+    message_hash = epoch.to_bytes(32, byteorder="little")
     slot = epoch * config.SLOTS_PER_EPOCH
     fork = Fork(**sample_fork_params)
     domain = get_domain(fork, slot, SignatureDomain.DOMAIN_RANDAO)
@@ -179,6 +179,7 @@ def test_randao_reveal_validation(is_valid,
     try:
         validate_randao_reveal(
             randao_reveal=randao_reveal,
+            proposer_index=expected_proposer_key_index,
             proposer_pubkey=expected_proposer_pubkey,
             epoch=expected_epoch,
             fork=fork,
@@ -219,10 +220,12 @@ def test_get_pubkey_for_indices(activated_genesis_validators, data):
         assert activated_genesis_validators[validator_index].pubkey == pubkey
 
 
-def _list_and_index(data, max_size=None, elements=st.integers()):
+def _list_and_index(data, max_size=None, elements=None):
     """
     Hypothesis helper function cribbed from their docs on @composite
     """
+    if elements is None:
+        elements = st.integers()
     xs = data.draw(st.lists(elements, max_size=max_size, unique=True))
     i = data.draw(st.integers(min_value=0, max_value=max(len(xs) - 1, 0)))
     return (xs, i)
@@ -302,7 +305,7 @@ def _correct_slashable_attestation_params(
 
     (validator_indices, signatures) = _get_indices_and_signatures(
         num_validators,
-        message_hashes[1],
+        message_hashes[0],  # custody bit is False
         privkeys,
         fork,
         slot_to_epoch(params["data"].slot, slots_per_epoch),

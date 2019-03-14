@@ -16,7 +16,6 @@ from eth_typing import (
 )
 from eth_utils import (
     to_tuple,
-    ValidationError,
 )
 
 from eth.constants import (
@@ -32,6 +31,7 @@ from eth2.beacon.enums import (
     SignatureDomain,
 )
 from eth2.beacon.committee_helpers import (
+    get_beacon_proposer_index,
     get_crosslink_committees_at_slot,
 )
 from eth2.beacon.configs import (
@@ -55,10 +55,11 @@ from eth2.beacon.types.attestation_data_and_custody_bits import (
 from eth2.beacon.types.attester_slashings import AttesterSlashing
 from eth2.beacon.types.deposit_input import DepositInput
 from eth2.beacon.types.forks import Fork
-from eth2.beacon.types.proposal_signed_data import ProposalSignedData
+from eth2.beacon.types.proposal import Proposal
 from eth2.beacon.types.proposer_slashings import ProposerSlashing
 from eth2.beacon.types.slashable_attestations import SlashableAttestation
 from eth2.beacon.types.states import BeaconState
+from eth2.beacon.types.voluntary_exits import VoluntaryExit
 from eth2.beacon.typing import (
     BLSPubkey,
     BLSSignature,
@@ -68,6 +69,9 @@ from eth2.beacon.typing import (
     Shard,
     Slot,
     ValidatorIndex,
+)
+from eth2.beacon.validation import (
+    validate_epoch_within_previous_and_next,
 )
 
 from .committee_assignment import (
@@ -172,21 +176,22 @@ def create_proposal_data_and_signature(
         block_root: Hash32,
         privkey: int,
         slots_per_epoch: int,
-        beacon_chain_shard_number: Shard)-> Tuple[ProposalSignedData, BLSSignature]:
-    proposal_data = ProposalSignedData(
+        beacon_chain_shard_number: Shard)-> Proposal:
+    proposal = Proposal(
         state.slot,
         beacon_chain_shard_number,
         block_root,
     )
     proposal_signature = sign_transaction(
-        message_hash=proposal_data.root,
+        message_hash=proposal.signed_root,
         privkey=privkey,
         fork=state.fork,
-        slot=proposal_data.slot,
+        slot=proposal.slot,
         signature_domain=SignatureDomain.DOMAIN_PROPOSAL,
         slots_per_epoch=slots_per_epoch,
     )
-    return proposal_data, proposal_signature
+    proposal = proposal.copy(signature=proposal_signature)
+    return proposal
 
 
 #
@@ -209,7 +214,7 @@ def create_mock_proposer_slashing_at_block(
     slots_per_epoch = config.SLOTS_PER_EPOCH
     beacon_chain_shard_number = config.BEACON_CHAIN_SHARD_NUMBER
 
-    proposal_data_1, proposal_signature_1 = create_proposal_data_and_signature(
+    proposal_1 = create_proposal_data_and_signature(
         state,
         block_root_1,
         keymap[state.validator_registry[proposer_index].pubkey],
@@ -217,7 +222,7 @@ def create_mock_proposer_slashing_at_block(
         beacon_chain_shard_number,
     )
 
-    proposal_data_2, proposal_signature_2 = create_proposal_data_and_signature(
+    proposal_2 = create_proposal_data_and_signature(
         state,
         block_root_2,
         keymap[state.validator_registry[proposer_index].pubkey],
@@ -227,10 +232,8 @@ def create_mock_proposer_slashing_at_block(
 
     return ProposerSlashing(
         proposer_index=proposer_index,
-        proposal_data_1=proposal_data_1,
-        proposal_data_2=proposal_data_2,
-        proposal_signature_1=proposal_signature_1,
-        proposal_signature_2=proposal_signature_2,
+        proposal_1=proposal_1,
+        proposal_2=proposal_2,
     )
 
 
@@ -263,7 +266,7 @@ def create_mock_slashable_attestation(state: BeaconState,
         get_epoch_start_slot(state.justified_epoch, config.SLOTS_PER_EPOCH),
         config.LATEST_BLOCK_ROOTS_LENGTH,
     )
-    latest_crosslink_root = state.latest_crosslinks[shard].crosslink_data_root
+    latest_crosslink = state.latest_crosslinks[shard]
 
     attestation_data = attestation_data = AttestationData(
         slot=attestation_slot,
@@ -271,7 +274,7 @@ def create_mock_slashable_attestation(state: BeaconState,
         beacon_block_root=beacon_block_root,
         epoch_boundary_root=epoch_boundary_root,
         crosslink_data_root=ZERO_HASH32,
-        latest_crosslink_root=latest_crosslink_root,
+        latest_crosslink=latest_crosslink,
         justified_epoch=state.justified_epoch,
         justified_block_root=justified_block_root,
     )
@@ -450,8 +453,8 @@ def create_mock_signed_attestation(state: BeaconState,
 
     # create attestation from attestation_data, particpipant_bitfield, and signature
     return Attestation(
-        data=attestation_data,
         aggregation_bitfield=aggregation_bitfield,
+        data=attestation_data,
         custody_bitfield=Bitfield(b'\x00' * len(aggregation_bitfield)),
         aggregate_signature=aggregate_signature,
     )
@@ -493,7 +496,7 @@ def create_mock_signed_attestations_at_slot(
         committee, shard = crosslink_committee
 
         num_voted_attesters = int(len(committee) * voted_attesters_ratio)
-        latest_crosslink_root = state.latest_crosslinks[shard].crosslink_data_root
+        latest_crosslink = state.latest_crosslinks[shard]
 
         attestation_data = AttestationData(
             slot=attestation_slot,
@@ -501,7 +504,7 @@ def create_mock_signed_attestations_at_slot(
             beacon_block_root=beacon_block_root,
             epoch_boundary_root=epoch_boundary_root,
             crosslink_data_root=ZERO_HASH32,
-            latest_crosslink_root=latest_crosslink_root,
+            latest_crosslink=latest_crosslink,
             justified_epoch=state.justified_epoch,
             justified_block_root=justified_block_root,
         )
@@ -516,6 +519,31 @@ def create_mock_signed_attestations_at_slot(
             keymap,
             config.SLOTS_PER_EPOCH,
         )
+
+
+#
+# VoluntaryExit
+#
+def create_mock_voluntary_exit(state: BeaconState,
+                               config: BeaconConfig,
+                               keymap: Dict[BLSPubkey, int],
+                               validator_index: ValidatorIndex,
+                               exit_epoch: Epoch=None) -> VoluntaryExit:
+    current_epoch = state.current_epoch(config.SLOTS_PER_EPOCH)
+    voluntary_exit = VoluntaryExit(
+        epoch=state.current_epoch(config.SLOTS_PER_EPOCH) if exit_epoch is None else exit_epoch,
+        validator_index=validator_index,
+    )
+    return voluntary_exit.copy(
+        signature=sign_transaction(
+            message_hash=voluntary_exit.signed_root,
+            privkey=keymap[state.validator_registry[validator_index].pubkey],
+            fork=state.fork,
+            slot=get_epoch_start_slot(current_epoch, config.SLOTS_PER_EPOCH),
+            signature_domain=SignatureDomain.DOMAIN_EXIT,
+            slots_per_epoch=config.SLOTS_PER_EPOCH,
+        )
+    )
 
 
 #
@@ -546,25 +574,19 @@ def get_committee_assignment(
     """
     current_epoch = state.current_epoch(config.SLOTS_PER_EPOCH)
     previous_epoch = state.previous_epoch(config.SLOTS_PER_EPOCH, config.GENESIS_EPOCH)
-    next_epoch = current_epoch + 1
+    next_epoch = Epoch(current_epoch + 1)
 
-    if previous_epoch > epoch:
-        raise ValidationError(
-            f"The given epoch ({epoch}) is less than previous epoch ({previous_epoch})"
-        )
-
-    if epoch > next_epoch:
-        raise ValidationError(
-            f"The given epoch ({epoch}) is greater than next epoch ({previous_epoch})"
-        )
+    validate_epoch_within_previous_and_next(epoch, previous_epoch, next_epoch)
 
     epoch_start_slot = get_epoch_start_slot(epoch, config.SLOTS_PER_EPOCH)
+
+    committee_config = CommitteeConfig(config)
 
     for slot in range(epoch_start_slot, epoch_start_slot + config.SLOTS_PER_EPOCH):
         crosslink_committees = get_crosslink_committees_at_slot(
             state,
             slot,
-            CommitteeConfig(config),
+            committee_config,
             registry_change=registry_change,
         )
         selected_committees = [
@@ -575,10 +597,12 @@ def get_committee_assignment(
         if len(selected_committees) > 0:
             validators = selected_committees[0][0]
             shard = selected_committees[0][1]
-            first_committee_at_slot = crosslink_committees[0][0]  # List[ValidatorIndex]
-            is_proposer = first_committee_at_slot[
-                slot % len(first_committee_at_slot)
-            ] == validator_index
+            is_proposer = validator_index == get_beacon_proposer_index(
+                state,
+                Slot(slot),
+                committee_config,
+                registry_change=registry_change,
+            )
 
             return CommitteeAssignment(validators, shard, Slot(slot), is_proposer)
 

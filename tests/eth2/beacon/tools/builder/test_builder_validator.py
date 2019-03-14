@@ -24,6 +24,7 @@ from eth2.beacon.tools.builder.validator import (
 )
 
 
+@pytest.mark.slow
 @settings(max_examples=1)
 @given(random=st.randoms())
 @pytest.mark.parametrize(
@@ -99,12 +100,13 @@ def test_aggregate_votes(votes_count, random, privkeys, pubkeys):
         'shard_count,'
         'state_epoch,'
         'epoch,'
+        'genesis_slot,'
     ),
     [
-        (40, 16, 1, 2, 0, 0),  # genesis
-        (40, 16, 1, 2, 1, 1),  # current epoch
-        (40, 16, 1, 2, 1, 0),  # previous epoch
-        (40, 16, 1, 2, 1, 2),  # next epoch
+        (40, 16, 1, 2, 0, 0, 0),  # genesis
+        (40, 16, 1, 2, 1, 1, 0),  # current epoch
+        (40, 16, 1, 2, 1, 0, 0),  # previous epoch
+        (40, 16, 1, 2, 1, 2, 0),  # next epoch
     ]
 )
 def test_get_committee_assignment(genesis_state,
@@ -166,12 +168,14 @@ def test_get_committee_assignment_no_assignment(genesis_state,
     state = genesis_state
     validator_index = 1
     current_epoch = state.current_epoch(slots_per_epoch)
+    validator = state.validator_registry[validator_index].copy(
+        exit_epoch=genesis_epoch,
+    )
     state = state.update_validator_registry(
         validator_index,
-        validator=state.validator_registry[validator_index].copy(
-            exit_epoch=genesis_epoch,
-        )
+        validator=validator,
     )
+    assert not validator.is_active(current_epoch)
 
     with pytest.raises(NoCommitteeAssignment):
         get_committee_assignment(state, config, current_epoch, validator_index, True)

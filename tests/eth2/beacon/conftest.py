@@ -16,12 +16,15 @@ from eth2.beacon.constants import (
     EMPTY_SIGNATURE,
     FAR_FUTURE_EPOCH,
 )
+from eth2.beacon.helpers import (
+    slot_to_epoch,
+)
 from eth2.beacon.types.attestation_data import AttestationData
 from eth2.beacon.types.crosslink_records import CrosslinkRecord
 from eth2.beacon.types.deposit_data import DepositData
 from eth2.beacon.types.deposit_input import DepositInput
 from eth2.beacon.types.eth1_data import Eth1Data
-from eth2.beacon.types.proposal_signed_data import ProposalSignedData
+from eth2.beacon.types.proposal import Proposal
 from eth2.beacon.types.slashable_attestations import SlashableAttestation
 from eth2.beacon.types.states import BeaconState
 
@@ -78,36 +81,34 @@ def pubkeys(keymap):
 
 
 @pytest.fixture
-def sample_proposer_slashing_params(sample_proposal_signed_data_params):
-    proposal_data = ProposalSignedData(**sample_proposal_signed_data_params)
+def sample_proposer_slashing_params(sample_proposal_params):
+    proposal_data = Proposal(**sample_proposal_params)
     return {
         'proposer_index': 1,
-        'proposal_data_1': proposal_data,
-        'proposal_signature_1': EMPTY_SIGNATURE,
-        'proposal_data_2': proposal_data,
-        'proposal_signature_2': EMPTY_SIGNATURE,
+        'proposal_1': proposal_data,
+        'proposal_2': proposal_data,
     }
 
 
 @pytest.fixture
 def sample_attestation_params(sample_attestation_data_params):
     return {
-        'data': AttestationData(**sample_attestation_data_params),
         'aggregation_bitfield': b'\12' * 16,
+        'data': AttestationData(**sample_attestation_data_params),
         'custody_bitfield': b'\34' * 16,
         'aggregate_signature': [0, 0],
     }
 
 
 @pytest.fixture
-def sample_attestation_data_params():
+def sample_attestation_data_params(sample_crosslink_record_params):
     return {
         'slot': 10,
         'shard': 12,
         'beacon_block_root': b'\x11' * 32,
         'epoch_boundary_root': b'\x22' * 32,
         'crosslink_data_root': b'\x33' * 32,
-        'latest_crosslink_root': b'\x44' * 32,
+        'latest_crosslink': CrosslinkRecord(**sample_crosslink_record_params),
         'justified_epoch': 0,
         'justified_block_root': b'\x55' * 32,
     }
@@ -129,14 +130,16 @@ def sample_beacon_block_body_params():
         'attestations': (),
         'deposits': (),
         'voluntary_exits': (),
+        'transfers': (),
     }
 
 
 @pytest.fixture
 def sample_beacon_block_params(sample_beacon_block_body_params,
-                               sample_eth1_data_params):
+                               sample_eth1_data_params,
+                               genesis_slot):
     return {
-        'slot': 10,
+        'slot': genesis_slot + 10,
         'parent_root': ZERO_HASH32,
         'state_root': b'\x55' * 32,
         'randao_reveal': EMPTY_SIGNATURE,
@@ -147,9 +150,12 @@ def sample_beacon_block_params(sample_beacon_block_body_params,
 
 
 @pytest.fixture
-def sample_beacon_state_params(sample_fork_params, sample_eth1_data_params):
+def sample_beacon_state_params(genesis_slot,
+                               genesis_epoch,
+                               sample_fork_params,
+                               sample_eth1_data_params):
     return {
-        'slot': 100,
+        'slot': genesis_slot + 100,
         'genesis_time': 0,
         'fork': Fork(**sample_fork_params),
         'validator_registry': (),
@@ -158,8 +164,8 @@ def sample_beacon_state_params(sample_fork_params, sample_eth1_data_params):
         'latest_randao_mixes': (),
         'previous_shuffling_start_shard': 1,
         'current_shuffling_start_shard': 2,
-        'previous_shuffling_epoch': 0,
-        'current_shuffling_epoch': 0,
+        'previous_shuffling_epoch': genesis_epoch,
+        'current_shuffling_epoch': genesis_epoch,
         'previous_shuffling_seed': b'\x77' * 32,
         'current_shuffling_seed': b'\x88' * 32,
         'previous_justified_epoch': 0,
@@ -258,11 +264,12 @@ def sample_pending_attestation_record_params(sample_attestation_data_params):
 
 
 @pytest.fixture
-def sample_proposal_signed_data_params():
+def sample_proposal_params():
     return {
         'slot': 10,
         'shard': 12,
         'block_root': b'\x43' * 32,
+        'signature': b'\x56' * 96,
     }
 
 
@@ -282,6 +289,19 @@ def sample_slashable_attestation_params(sample_attestation_data_params):
         'data': AttestationData(**sample_attestation_data_params),
         'custody_bitfield': b'\00' * 4,
         'aggregate_signature': EMPTY_SIGNATURE,
+    }
+
+
+@pytest.fixture
+def sample_transfer_params():
+    return {
+        'from_validator_index': 10,
+        'to_validator_index': 12,
+        'amount': 10 * 10**9,
+        'fee': 5 * 10**9,
+        'slot': 5,
+        'pubkey': b'\x67' * 48,
+        'signature': b'\x43' * 96,
     }
 
 
@@ -344,12 +364,13 @@ def n():
 
 
 @pytest.fixture()
-def n_validators_state(filled_beacon_state, max_deposit_amount, n):
+def n_validators_state(filled_beacon_state, max_deposit_amount, n, config):
     validator_count = n
     return filled_beacon_state.copy(
         validator_registry=tuple(
             mock_validator_record(
-                pubkey=index.to_bytes(48, "big"),
+                pubkey=index.to_bytes(48, "little"),
+                config=config,
                 is_active=True,
             )
             for index in range(validator_count)
@@ -420,6 +441,16 @@ def max_indices_per_slashable_vote():
 
 
 @pytest.fixture
+def max_exit_dequeues_per_epoch():
+    return SERENITY_CONFIG.MAX_EXIT_DEQUEUES_PER_EPOCH
+
+
+@pytest.fixture
+def shuffle_round_count():
+    return SERENITY_CONFIG.SHUFFLE_ROUND_COUNT
+
+
+@pytest.fixture
 def latest_block_roots_length():
     return SERENITY_CONFIG.LATEST_BLOCK_ROOTS_LENGTH
 
@@ -470,8 +501,8 @@ def genesis_slot():
 
 
 @pytest.fixture
-def genesis_epoch():
-    return SERENITY_CONFIG.GENESIS_EPOCH
+def genesis_epoch(genesis_slot, slots_per_epoch):
+    return slot_to_epoch(genesis_slot, slots_per_epoch)
 
 
 @pytest.fixture
@@ -540,6 +571,11 @@ def inactivity_penalty_quotient():
 
 
 @pytest.fixture
+def min_penalty_quotient():
+    return SERENITY_CONFIG.MIN_PENALTY_QUOTIENT
+
+
+@pytest.fixture
 def max_proposer_slashings():
     return SERENITY_CONFIG.MAX_PROPOSER_SLASHINGS
 
@@ -562,6 +598,11 @@ def max_deposits():
 @pytest.fixture
 def max_voluntary_exits():
     return SERENITY_CONFIG.MAX_VOLUNTARY_EXITS
+
+
+@pytest.fixture
+def max_transfers():
+    return SERENITY_CONFIG.MAX_TRANSFERS
 
 
 #
@@ -609,13 +650,15 @@ def genesis_block(genesis_state, genesis_slot):
 @pytest.fixture
 def genesis_validators(init_validator_pubkeys,
                        init_randao,
-                       max_deposit_amount):
+                       max_deposit_amount,
+                       config):
     """
     Inactive
     """
     return tuple(
         mock_validator_record(
             pubkey=pubkey,
+            config=config,
             withdrawal_credentials=ZERO_HASH32,
             is_active=False,
         )
@@ -653,6 +696,8 @@ def config(
         max_balance_churn_quotient,
         beacon_chain_shard_number,
         max_indices_per_slashable_vote,
+        max_exit_dequeues_per_epoch,
+        shuffle_round_count,
         latest_block_roots_length,
         latest_active_index_roots_length,
         latest_randao_mixes_length,
@@ -677,11 +722,13 @@ def config(
         whistleblower_reward_quotient,
         attestation_inclusion_reward_quotient,
         inactivity_penalty_quotient,
+        min_penalty_quotient,
         max_proposer_slashings,
         max_attester_slashings,
         max_attestations,
         max_deposits,
-        max_voluntary_exits
+        max_voluntary_exits,
+        max_transfers
 ):
     return BeaconConfig(
         SHARD_COUNT=shard_count,
@@ -690,6 +737,8 @@ def config(
         MAX_BALANCE_CHURN_QUOTIENT=max_balance_churn_quotient,
         BEACON_CHAIN_SHARD_NUMBER=beacon_chain_shard_number,
         MAX_INDICES_PER_SLASHABLE_VOTE=max_indices_per_slashable_vote,
+        MAX_EXIT_DEQUEUES_PER_EPOCH=max_exit_dequeues_per_epoch,
+        SHUFFLE_ROUND_COUNT=shuffle_round_count,
         LATEST_BLOCK_ROOTS_LENGTH=latest_block_roots_length,
         LATEST_ACTIVE_INDEX_ROOTS_LENGTH=latest_active_index_roots_length,
         LATEST_RANDAO_MIXES_LENGTH=latest_randao_mixes_length,
@@ -714,11 +763,13 @@ def config(
         WHISTLEBLOWER_REWARD_QUOTIENT=whistleblower_reward_quotient,
         ATTESTATION_INCLUSION_REWARD_QUOTIENT=attestation_inclusion_reward_quotient,
         INACTIVITY_PENALTY_QUOTIENT=inactivity_penalty_quotient,
+        MIN_PENALTY_QUOTIENT=min_penalty_quotient,
         MAX_PROPOSER_SLASHINGS=max_proposer_slashings,
         MAX_ATTESTER_SLASHINGS=max_attester_slashings,
         MAX_ATTESTATIONS=max_attestations,
         MAX_DEPOSITS=max_deposits,
         MAX_VOLUNTARY_EXITS=max_voluntary_exits,
+        MAX_TRANSFERS=max_transfers,
     )
 
 

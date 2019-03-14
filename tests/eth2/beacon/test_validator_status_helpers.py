@@ -47,12 +47,14 @@ def test_activate_validator(is_genesis,
                             genesis_epoch,
                             slots_per_epoch,
                             activation_exit_delay,
-                            max_deposit_amount):
+                            max_deposit_amount,
+                            config):
     validator_count = 10
     state = filled_beacon_state.copy(
         validator_registry=tuple(
             mock_validator_record(
-                pubkey=index.to_bytes(48, 'big'),
+                pubkey=index.to_bytes(48, 'little'),
+                config=config,
                 is_active=False,
             )
             for index in range(validator_count)
@@ -187,7 +189,8 @@ def test_settle_penality_to_validator_and_whistleblower(monkeypatch,
 
     def mock_get_crosslink_committees_at_slot(state,
                                               slot,
-                                              committee_config):
+                                              committee_config,
+                                              registry_change=False):
         return (
             (committee, 1,),
         )
@@ -269,7 +272,8 @@ def test_slash_validator(monkeypatch,
 
     def mock_get_crosslink_committees_at_slot(state,
                                               slot,
-                                              committee_config):
+                                              committee_config,
+                                              registry_change=False):
         return (
             (committee, 1,),
         )
