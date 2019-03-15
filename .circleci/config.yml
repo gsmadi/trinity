@@ -239,7 +239,7 @@ jobs:
     steps:
       - checkout
       - run: docker build -t ethereum/trinity:test-build .
-      - run: docker run ethereum/trinity:test-build --help
+      - run: docker run ethereum/trinity:test-build --version
 
 workflows:
   version: 2
