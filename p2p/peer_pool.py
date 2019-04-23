@@ -23,24 +23,25 @@ from eth_keys import (
 )
 from eth_utils.toolz import (
     groupby,
+    take,
 )
 from lahja import (
     Endpoint,
     BroadcastConfig,
 )
 
+from p2p._utils import clamp, token_bucket
 from p2p.constants import (
     DEFAULT_MAX_PEERS,
     DEFAULT_PEER_BOOT_TIMEOUT,
     DISCOVERY_EVENTBUS_ENDPOINT,
-    DISOVERY_INTERVAL,
+    PEER_CONNECT_INTERVAL,
+    MAX_SEQUENTIAL_PEER_CONNECT,
     REQUEST_PEER_CANDIDATE_TIMEOUT,
 )
-from p2p.events import (
-    PeerCandidatesRequest,
-    RandomBootnodeRequest,
-)
 from p2p.exceptions import (
+    BaseP2PError,
+    IneligiblePeer,
     BadAckMessage,
     HandshakeFailure,
     MalformedMessage,
@@ -48,7 +49,6 @@ from p2p.exceptions import (
     UnreachablePeer,
 )
 from p2p.kademlia import (
-    from_uris,
     Node,
 )
 from p2p.peer import (
@@ -58,6 +58,11 @@ from p2p.peer import (
     handshake,
     PeerMessage,
     PeerSubscriber,
+)
+from p2p.peer_backend import (
+    BasePeerBackend,
+    DiscoveryPeerBackend,
+    BootnodesPeerBackend,
 )
 from p2p.persistence import (
     BasePeerInfo,
@@ -72,6 +77,22 @@ from p2p.service import (
 
 
 TO_DISCOVERY_BROADCAST_CONFIG = BroadcastConfig(filter_endpoint=DISCOVERY_EVENTBUS_ENDPOINT)
+
+
+COMMON_PEER_CONNECTION_EXCEPTIONS = cast(Tuple[Type[BaseP2PError], ...], (
+    PeerConnectionLost,
+    TimeoutError,
+    UnreachablePeer,
+))
+
+# This should contain all exceptions that should not propogate during a
+# standard attempt to connect to a peer.
+ALLOWED_PEER_CONNECTION_EXCEPTIONS = cast(Tuple[Type[BaseP2PError], ...], (
+    IneligiblePeer,
+    BadAckMessage,
+    MalformedMessage,
+    HandshakeFailure,
+)) + COMMON_PEER_CONNECTION_EXCEPTIONS
 
 
 class BasePeerPool(BaseService, AsyncIterable[BasePeer]):
@@ -104,44 +125,49 @@ class BasePeerPool(BaseService, AsyncIterable[BasePeer]):
         self._subscribers: List[PeerSubscriber] = []
         self.event_bus = event_bus
 
+        self.peer_backends = self.setup_peer_backends()
+
+    def setup_peer_backends(self) -> Tuple[BasePeerBackend, ...]:
+        return (
+            DiscoveryPeerBackend(self.event_bus),
+            BootnodesPeerBackend(self.event_bus),
+        )
+
+    async def _add_peers_from_backend(self, backend: BasePeerBackend) -> None:
+        available_slots = self.max_peers - len(self)
+
+        try:
+            candidates = await self.wait(
+                backend.get_peer_candidates(
+                    num_requested=available_slots,
+                    num_connected_peers=len(self),
+                ),
+                timeout=REQUEST_PEER_CANDIDATE_TIMEOUT,
+            )
+        except TimeoutError:
+            self.logger.warning("PeerCandidateRequest timed out to backend %s", backend)
+            return
+        else:
+            self.logger.debug2(
+                "Got candidates from backend %s (%s)",
+                backend,
+                candidates,
+            )
+            await self.connect_to_nodes(iter(candidates))
+
     async def maybe_connect_more_peers(self) -> None:
-        while self.is_operational:
-            await self.sleep(DISOVERY_INTERVAL)
+        # allowed to operate at a maximum rate of 1 check every 2 seconds
+        rate_limiter = token_bucket(1 / PEER_CONNECT_INTERVAL, MAX_SEQUENTIAL_PEER_CONNECT)
+        while True:
+            if self.is_full:
+                await self.sleep(PEER_CONNECT_INTERVAL)
+                continue
+            await self.wait(rate_limiter.__anext__())
 
-            available_peer_slots = self.max_peers - len(self)
-            if available_peer_slots > 0:
-                try:
-                    response = await self.wait(
-                        self.event_bus.request(
-                            PeerCandidatesRequest(available_peer_slots),
-                            TO_DISCOVERY_BROADCAST_CONFIG,
-                        ),
-                        timeout=REQUEST_PEER_CANDIDATE_TIMEOUT
-                    )
-                except TimeoutError:
-                    self.logger.warning("Discovery did not answer PeerCandidateRequest in time")
-                    continue
-
-                # In some cases (e.g ROPSTEN or private testnets), the discovery table might be
-                # full of bad peers so if we can't connect to any peers we try a random bootstrap
-                # node as well.
-                if not len(self):
-                    try:
-                        response = await self.wait(
-                            self.event_bus.request(
-                                RandomBootnodeRequest(),
-                                TO_DISCOVERY_BROADCAST_CONFIG
-                            ),
-                            timeout=REQUEST_PEER_CANDIDATE_TIMEOUT
-                        )
-                    except TimeoutError:
-                        self.logger.warning(
-                            "Discovery did not answer RandomBootnodeRequest in time"
-                        )
-                        continue
-
-                self.logger.debug2("Received candidates to connect to (%s)", response.candidates)
-                await self.connect_to_nodes(from_uris(response.candidates))
+            await self.wait(asyncio.gather(*(
+                self._add_peers_from_backend(backend)
+                for backend in self.peer_backends
+            )))
 
     def __len__(self) -> int:
         return len(self.connected_nodes)
@@ -245,14 +271,10 @@ class BasePeerPool(BaseService, AsyncIterable[BasePeer]):
         """
         if remote in self.connected_nodes:
             self.logger.debug2("Skipping %s; already connected to it", remote)
-            return None
+            raise IneligiblePeer(f"Already connected to {remote}")
         if not self.peer_info.should_connect_to(remote):
-            return None
-        expected_exceptions = (
-            PeerConnectionLost,
-            TimeoutError,
-            UnreachablePeer,
-        )
+            raise IneligiblePeer(f"Peer database rejected peer candidate: {remote}")
+
         try:
             self.logger.debug2("Connecting to %s...", remote)
             # We use self.wait() as well as passing our CancelToken to handshake() as a workaround
@@ -264,40 +286,97 @@ class BasePeerPool(BaseService, AsyncIterable[BasePeer]):
             # Pass it on to instruct our main loop to stop.
             raise
         except BadAckMessage:
-            # This is kept separate from the `expected_exceptions` to be sure that we aren't
+            # This is kept separate from the
+            # `COMMON_PEER_CONNECTION_EXCEPTIONS` to be sure that we aren't
             # silencing an error in our authentication code.
             self.logger.error('Got bad auth ack from %r', remote)
             # dump the full stacktrace in the debug logs
             self.logger.debug('Got bad auth ack from %r', remote, exc_info=True)
+            raise
         except MalformedMessage:
-            # This is kept separate from the `expected_exceptions` to be sure that we aren't
+            # This is kept separate from the
+            # `COMMON_PEER_CONNECTION_EXCEPTIONS` to be sure that we aren't
             # silencing an error in how we decode messages during handshake.
             self.logger.error('Got malformed response from %r during handshake', remote)
             # dump the full stacktrace in the debug logs
             self.logger.debug('Got malformed response from %r', remote, exc_info=True)
+            raise
         except HandshakeFailure as e:
             self.logger.debug("Could not complete handshake with %r: %s", remote, repr(e))
             self.peer_info.record_failure(remote, e)
-        except expected_exceptions as e:
+            raise
+        except COMMON_PEER_CONNECTION_EXCEPTIONS as e:
             self.logger.debug("Could not complete handshake with %r: %s", remote, repr(e))
+            raise
         except Exception:
             self.logger.exception("Unexpected error during auth/p2p handshake with %r", remote)
-        return None
+            raise
 
     async def connect_to_nodes(self, nodes: Iterator[Node]) -> None:
-        for node in nodes:
+        # create an generator for the nodes
+        nodes_iter = iter(nodes)
+
+        while True:
             if self.is_full or not self.is_operational:
                 return
 
-            # TODO: Consider changing connect() to raise an exception instead of returning None,
-            # as discussed in
-            # https://github.com/ethereum/py-evm/pull/139#discussion_r152067425
+            # only attempt to connect to up to the maximum number of available
+            # peer slots that are open.
+            available_peer_slots = self.max_peers - len(self)
+            batch_size = clamp(1, 10, available_peer_slots)
+            batch = tuple(take(batch_size, nodes_iter))
+
+            # There are no more *known* nodes to connect to.
+            if not batch:
+                return
+
+            self.logger.debug(
+                'Initiating %d peer connection attempts with %d open peer slots',
+                len(batch),
+                available_peer_slots,
+            )
+            # Try to connect to the peers concurrently.
+            await self.wait(asyncio.gather(
+                *(self.connect_to_node(node) for node in batch),
+                loop=self.get_event_loop(),
+            ))
+
+    async def connect_to_node(self, node: Node) -> None:
+        """
+        Connect to a single node quietly aborting if the peer pool is full or
+        shutting down, or one of the expected peer level exceptions is raised
+        while connecting.
+        """
+        if self.is_full or not self.is_operational:
+            return
+
+        try:
             peer = await self.connect(node)
-            if peer is not None:
-                await self.start_peer(peer)
+        except ALLOWED_PEER_CONNECTION_EXCEPTIONS:
+            return
+
+        # Check again to see if we have *become* full since the previous
+        # check.
+        if self.is_full:
+            self.logger.debug(
+                "Successfully connected to %s but peer pool is full.  Disconnecting.",
+                peer,
+            )
+            await peer.disconnect(DisconnectReason.too_many_peers)
+            return
+        elif not self.is_operational:
+            self.logger.debug(
+                "Successfully connected to %s but peer pool no longer operational.  Disconnecting.",
+                peer,
+            )
+            await peer.disconnect(DisconnectReason.client_quitting)
+            return
+        else:
+            await self.start_peer(peer)
 
     def _peer_finished(self, peer: BaseService) -> None:
-        """Remove the given peer from our list of connected nodes.
+        """
+        Remove the given peer from our list of connected nodes.
         This is passed as a callback to be called when a peer finishes.
         """
         peer = cast(BasePeer, peer)

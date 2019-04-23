@@ -8,6 +8,8 @@ deps = {
     'p2p': [
         "asyncio-cancel-token==0.1.0a2",
         "async_lru>=0.1.0,<1.0.0",
+        # cryptography does not use semver and allows breaking changes within `0.3` version bumps.
+        "cryptography>=2.5,<2.7",
         "eth-hash>=0.1.4,<1",
         "netifaces>=0.10.7<1",
         "pysha3>=1.0.0,<2.0.0",
@@ -18,7 +20,7 @@ deps = {
         "bloom-filter==1.3",
         "cachetools>=2.1.0,<3.0.0",
         "coincurve>=10.0.0,<11.0.0",
-        "eth-utils>=1.3.0,<2",
+        "eth-utils>=1.5.1,<2",
         "ipython>=6.2.1,<7.0.0",
         "plyvel==1.0.5",
         "py-evm==0.2.0a42",
@@ -34,6 +36,7 @@ deps = {
     'test': [
         "hypothesis==3.69.5",
         "pexpect>=4.6, <5",
+        "factory-boy==2.11.1",
         # pinned to <3.7 until async fixtures work again
         # https://github.com/pytest-dev/pytest-asyncio/issues/89
         "pytest>=3.6,<3.7",
@@ -47,7 +50,7 @@ deps = {
     'lint': [
         "flake8==3.5.0",
         "flake8-bugbear==18.8.0",
-        "mypy==0.641",
+        "mypy==0.701",
     ],
     'doc': [
         "pytest~=3.2",
