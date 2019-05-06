@@ -1,57 +1,51 @@
-from typing import Iterator
+from typing import Iterable, Sequence, Tuple
 
-from eth_typing import Hash32
-
-
-def humanize_elapsed(seconds: int) -> str:
-    return ''.join(_humanize_elapsed(seconds))
+from eth_utils.toolz import sliding_window
 
 
-SECOND = 1
-MINUTE = 60
-HOUR = 60 * 60
-DAY = 24 * HOUR
-YEAR = 365 * DAY
-MONTH = YEAR // 12
-WEEK = 7 * DAY
+def _find_breakpoints(*values: int) -> Iterable[int]:
+    yield 0
+    for index, (left, right) in enumerate(sliding_window(2, values), 1):
+        if left + 1 == right:
+            continue
+        else:
+            yield index
+    yield len(values)
 
 
-UNITS = (
-    (YEAR, 'y'),
-    (MONTH, 'm'),
-    (WEEK, 'w'),
-    (DAY, 'd'),
-    (HOUR, 'h'),
-    (MINUTE, 'm'),
-    (SECOND, 's'),
-)
+def _extract_integer_ranges(*values: int) -> Iterable[Tuple[int, int]]:
+    """
+    Take a sequence of integers which is expected to be ordered and return the
+    most concise definition of the sequence in terms of integer ranges.
+
+    - fn(1, 2, 3) -> ((1, 3),)
+    - fn(1, 2, 3, 7, 8, 9) -> ((1, 3), (7, 9))
+    - fn(1, 7, 8, 9) -> ((1, 1), (7, 9))
+    """
+    for left, right in sliding_window(2, _find_breakpoints(*values)):
+        chunk = values[left:right]
+        yield chunk[0], chunk[-1]
 
 
-def _humanize_elapsed(seconds: int) -> Iterator[str]:
-    if not seconds:
-        yield '0s'
-
-    num_display_units = 0
-    remainder = seconds
-
-    for duration, unit in UNITS:
-        if not remainder:
-            break
-        if remainder >= duration or num_display_units:
-            num = remainder // duration
-            yield f"{num}{unit}"
-            num_display_units += 1
-
-        if num_display_units >= 3:
-            return
-
-        remainder %= duration
+def _humanize_range(bounds: Tuple[int, int]) -> str:
+    left, right = bounds
+    if left == right:
+        return str(left)
+    else:
+        return f'{left}-{right}'
 
 
-DISPLAY_HASH_BYTES = 2
+def humanize_integer_sequence(values: Sequence[int]) -> str:
+    """
+    Return a human readable string that attempts to concisely define a sequence
+    of integers.
 
-
-def humanize_hash(value: Hash32) -> str:
-    head = value[:DISPLAY_HASH_BYTES]
-    tail = value[-1 * DISPLAY_HASH_BYTES:]
-    return f"{head.hex()}..{tail.hex()}"
+    - fn((1, 2, 3)) -> '1-3'
+    - fn((1, 2, 3, 7, 8, 9)) -> '1-3|7-9'
+    - fn((1, 2, 3, 5, 7, 8, 9)) -> '1-3|5|7-9'
+    - fn((1, 7, 8, 9)) -> '1|7-9'
+    """
+    if not values:
+        return "(empty)"
+    else:
+        return '|'.join(map(_humanize_range, _extract_integer_ranges(*values)))

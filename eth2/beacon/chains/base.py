@@ -53,6 +53,7 @@ from eth2.beacon.typing import (
 from eth2.beacon.validation import (
     validate_slot,
 )
+from eth2.configs import Eth2Config
 
 if TYPE_CHECKING:
     from eth2.beacon.state_machines.base import (  # noqa: F401
@@ -85,7 +86,8 @@ class BaseBeaconChain(Configurable, ABC):
     def from_genesis(cls,
                      base_db: BaseAtomicDB,
                      genesis_state: BeaconState,
-                     genesis_block: BaseBeaconBlock) -> 'BaseBeaconChain':
+                     genesis_block: BaseBeaconBlock,
+                     config: Eth2Config) -> 'BaseBeaconChain':
         pass
 
     #
@@ -170,7 +172,7 @@ class BeaconChain(BaseBeaconChain):
 
     chaindb_class = BeaconChainDB  # type: Type[BaseBeaconChainDB]
 
-    def __init__(self, base_db: BaseAtomicDB) -> None:
+    def __init__(self, base_db: BaseAtomicDB, config: Eth2Config) -> None:
         if not self.sm_configuration:
             raise ValueError(
                 "The Chain class cannot be instantiated with an empty `sm_configuration`"
@@ -180,7 +182,7 @@ class BeaconChain(BaseBeaconChain):
             # validate_sm_configuration(self.sm_configuration)
             pass
 
-        self.chaindb = self.get_chaindb_class()(base_db)
+        self.chaindb = self.get_chaindb_class()(base_db, config)
 
     #
     # Helpers
@@ -198,7 +200,8 @@ class BeaconChain(BaseBeaconChain):
     def from_genesis(cls,
                      base_db: BaseAtomicDB,
                      genesis_state: BeaconState,
-                     genesis_block: BaseBeaconBlock) -> 'BaseBeaconChain':
+                     genesis_block: BaseBeaconBlock,
+                     config: Eth2Config) -> 'BaseBeaconChain':
         """
         Initialize the ``BeaconChain`` from a genesis state.
         """
@@ -211,20 +214,21 @@ class BeaconChain(BaseBeaconChain):
                 )
             )
 
-        chaindb = cls.get_chaindb_class()(db=base_db)
+        chaindb = cls.get_chaindb_class()(db=base_db, config=config)
         chaindb.persist_state(genesis_state)
-        return cls._from_genesis_block(base_db, genesis_block)
+        return cls._from_genesis_block(base_db, genesis_block, config)
 
     @classmethod
     def _from_genesis_block(cls,
                             base_db: BaseAtomicDB,
-                            genesis_block: BaseBeaconBlock) -> 'BaseBeaconChain':
+                            genesis_block: BaseBeaconBlock,
+                            config: Eth2Config) -> 'BaseBeaconChain':
         """
         Initialize the ``BeaconChain`` from the genesis block.
         """
-        chaindb = cls.get_chaindb_class()(db=base_db)
+        chaindb = cls.get_chaindb_class()(db=base_db, config=config)
         chaindb.persist_block(genesis_block, genesis_block.__class__)
-        return cls(base_db)
+        return cls(base_db, config)
 
     #
     # StateMachine API
@@ -370,7 +374,7 @@ class BeaconChain(BaseBeaconChain):
                 "Attempt to import block #{}.  Cannot import block {} before importing "
                 "its parent block at {}".format(
                     block.slot,
-                    block.signed_root,
+                    block.signing_root,
                     block.previous_block_root,
                 )
             )
@@ -380,12 +384,12 @@ class BeaconChain(BaseBeaconChain):
         )
         state, imported_block = self.get_state_machine(base_block_for_import).import_block(block)
 
-        # TODO: Now it just persists all state. Should design how to clean up the old state.
-        self.chaindb.persist_state(state)
-
         # Validate the imported block.
         if perform_validation:
             validate_imported_block_unchanged(imported_block, block)
+
+        # TODO: Now it just persists all state. Should design how to clean up the old state.
+        self.chaindb.persist_state(state)
 
         (
             new_canonical_blocks,
@@ -395,7 +399,7 @@ class BeaconChain(BaseBeaconChain):
         self.logger.debug(
             'IMPORTED_BLOCK: slot %s | signed root %s',
             imported_block.slot,
-            encode_hex(imported_block.signed_root),
+            encode_hex(imported_block.signing_root),
         )
 
         return imported_block, new_canonical_blocks, old_canonical_blocks

@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from eth2.beacon.types.attestations import Attestation  # noqa: F401
     from eth2.beacon.types.attestation_data import AttestationData  # noqa: F401
     from eth2.beacon.types.states import BeaconState  # noqa: F401
-    from eth2.beacon.types.validator_records import ValidatorRecord  # noqa: F401
+    from eth2.beacon.types.validators import Validator  # noqa: F401
 
 
 def get_epoch_committee_count(
@@ -72,7 +72,7 @@ def get_epoch_committee_count(
 @functools.lru_cache(maxsize=128)
 def get_shuffling(*,
                   seed: Hash32,
-                  validators: Sequence['ValidatorRecord'],
+                  validators: Sequence['Validator'],
                   epoch: Epoch,
                   committee_config: CommitteeConfig) -> Tuple[Sequence[ValidatorIndex], ...]:
     """
@@ -223,11 +223,7 @@ def _get_shuffling_contextis_next_epoch_registry_change(
         seed=helpers.generate_seed(
             state=state,
             epoch=next_epoch,
-            slots_per_epoch=committee_config.SLOTS_PER_EPOCH,
-            min_seed_lookahead=committee_config.MIN_SEED_LOOKAHEAD,
-            activation_exit_delay=committee_config.SLOTS_PER_EPOCH,
-            latest_active_index_roots_length=committee_config.LATEST_ACTIVE_INDEX_ROOTS_LENGTH,
-            latest_randao_mixes_length=committee_config.LATEST_RANDAO_MIXES_LENGTH,
+            committee_config=committee_config,
         ),
         shuffling_epoch=next_epoch,
         # for mocking this out in tests.
@@ -252,11 +248,7 @@ def _get_shuffling_contextis_next_epoch_should_reseed(
         seed=helpers.generate_seed(
             state=state,
             epoch=next_epoch,
-            slots_per_epoch=committee_config.SLOTS_PER_EPOCH,
-            min_seed_lookahead=committee_config.MIN_SEED_LOOKAHEAD,
-            activation_exit_delay=committee_config.SLOTS_PER_EPOCH,
-            latest_active_index_roots_length=committee_config.LATEST_ACTIVE_INDEX_ROOTS_LENGTH,
-            latest_randao_mixes_length=committee_config.LATEST_RANDAO_MIXES_LENGTH,
+            committee_config=committee_config,
         ),
         shuffling_epoch=next_epoch,
         shuffling_start_shard=state.current_shuffling_start_shard,

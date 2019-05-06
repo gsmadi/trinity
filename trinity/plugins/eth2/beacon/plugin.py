@@ -6,7 +6,7 @@ from argparse import (
 from p2p import ecies
 from p2p.constants import DEFAULT_MAX_PEERS
 from trinity._utils.shutdown import (
-    exit_with_service_and_endpoint,
+    exit_with_endpoint_and_services,
 )
 from trinity.config import BeaconAppConfig
 from trinity.endpoint import TrinityEventBusEndpoint
@@ -47,7 +47,7 @@ class BeaconNodePlugin(BaseIsolatedPlugin):
         base_db = db_manager.get_db()  # type: ignore
         chain_db = db_manager.get_chaindb()  # type: ignore
         chain_config = beacon_config.get_chain_config()
-        chain = chain_config.beacon_chain_class(base_db)
+        chain = chain_config.beacon_chain_class(base_db, chain_config.eth2_config)
 
         if self.context.args.beacon_nodekey:
             from eth_keys.datatypes import PrivateKey
@@ -77,7 +77,7 @@ class BeaconNodePlugin(BaseIsolatedPlugin):
         )
 
         loop = asyncio.get_event_loop()
-        asyncio.ensure_future(exit_with_service_and_endpoint(server, self.context.event_bus))
+        asyncio.ensure_future(exit_with_endpoint_and_services(self.context.event_bus, server))
         asyncio.ensure_future(server.run())
         asyncio.ensure_future(syncer.run())
         loop.run_forever()

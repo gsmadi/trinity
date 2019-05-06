@@ -13,12 +13,13 @@ deps = {
         "eth-hash>=0.1.4,<1",
         "netifaces>=0.10.7<1",
         "pysha3>=1.0.0,<2.0.0",
+        "SQLAlchemy>=1.3.3,<2",
         "upnpclient>=0.0.8,<1",
     ],
     'trinity': [
         "async-generator==1.10",
         "bloom-filter==1.3",
-        "cachetools>=2.1.0,<3.0.0",
+        "cachetools>=3.1.0,<4.0.0",
         "coincurve>=10.0.0,<11.0.0",
         "eth-utils>=1.5.1,<2",
         "ipython>=6.2.1,<7.0.0",
@@ -29,7 +30,7 @@ deps = {
         "termcolor>=1.1.0,<2.0.0",
         "uvloop==0.11.2;platform_system=='Linux' or platform_system=='Darwin' or platform_system=='FreeBSD'",  # noqa: E501
         "websockets==5.0.1",
-        "jsonschema==2.6.0",
+        "jsonschema==3.0.1",
         "mypy_extensions>=0.4.1,<1.0.0",
         "typing_extensions>=3.7.2,<4.0.0",
     ],
@@ -51,6 +52,7 @@ deps = {
         "flake8==3.5.0",
         "flake8-bugbear==18.8.0",
         "mypy==0.701",
+        "sqlalchemy-stubs==0.1",
     ],
     'doc': [
         "pytest~=3.2",
@@ -82,7 +84,7 @@ deps = {
         "py-ecc>=1.6.0,<2.0.0",
         "rlp>=1.1.0,<2.0.0",
         "py-evm==0.2.0a42",
-        "ssz==0.1.0a2",
+        "ssz==0.1.0a7",
     ],
     'libp2p': [
         "base58>=1.0.3",
@@ -113,12 +115,18 @@ deps['dev'] = (
 
 install_requires = deps['trinity'] + deps['p2p'] + deps['eth2']
 
+
+with open('./README.md') as readme:
+    long_description = readme.read()
+
+
 setup(
     name='trinity',
     # *IMPORTANT*: Don't manually change the version here. Use the 'bumpversion' utility.
     version='0.1.0-alpha.23',
     description='The Trinity client for the Ethereum network',
-    long_description_markdown_filename='README.md',
+    long_description=long_description,
+    long_description_content_type='text/markdown',
     author='Ethereum Foundation',
     author_email='piper@pipermerriam.com',
     url='https://github.com/ethereum/trinity',
@@ -127,7 +135,6 @@ setup(
     python_requires=">=3.6,<4",
     install_requires=install_requires,
     extras_require=deps,
-    setup_requires=['setuptools-markdown'],
     license='MIT',
     zip_safe=False,
     keywords='ethereum blockchain evm trinity',

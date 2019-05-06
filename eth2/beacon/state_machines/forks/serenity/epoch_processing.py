@@ -14,6 +14,7 @@ from eth_utils.toolz import (
     curry,
     first,
 )
+import ssz
 
 from eth2.beacon import helpers
 from eth2._utils.numeric import (
@@ -59,13 +60,10 @@ from eth2.beacon.validator_status_helpers import (
     exit_validator,
     prepare_validator_for_withdrawal,
 )
-from eth2.beacon._utils.hash import (
-    hash_eth2,
-)
 from eth2.beacon.datastructures.inclusion_info import InclusionInfo
 from eth2.beacon.types.attestations import Attestation
-from eth2.beacon.types.pending_attestation_records import PendingAttestationRecord
-from eth2.beacon.types.crosslink_records import CrosslinkRecord
+from eth2.beacon.types.pending_attestations import PendingAttestation
+from eth2.beacon.types.crosslinks import Crosslink
 from eth2.beacon.types.eth1_data_vote import Eth1DataVote
 from eth2.beacon.types.historical_batch import HistoricalBatch
 from eth2.beacon.types.states import BeaconState
@@ -130,7 +128,7 @@ def process_eth1_data_votes(state: BeaconState, config: Eth2Config) -> BeaconSta
 #
 
 def _is_epoch_justifiable(state: BeaconState,
-                          attestations: Sequence[PendingAttestationRecord],
+                          attestations: Sequence[PendingAttestation],
                           epoch: Epoch,
                           config: Eth2Config) -> bool:
     """
@@ -323,7 +321,7 @@ def process_crosslinks(state: BeaconState, config: Eth2Config) -> BeaconState:
                     latest_crosslinks = update_tuple_item(
                         latest_crosslinks,
                         shard,
-                        CrosslinkRecord(
+                        Crosslink(
                             epoch=slot_to_epoch(Slot(slot), config.SLOTS_PER_EPOCH),
                             crosslink_data_root=winning_root,
                         ),
@@ -482,7 +480,7 @@ def _compute_inactivity_leak_deltas(
             rewards_received = _update_rewards_or_penalies(
                 index,
                 (
-                    base_rewards[index] // config.MIN_ATTESTATION_INCLUSION_DELAY //
+                    base_rewards[index] * config.MIN_ATTESTATION_INCLUSION_DELAY //
                     inclusion_infos[index].inclusion_distance
                 ),
                 rewards_received,
@@ -817,11 +815,7 @@ def _update_shuffling_start_shard(state: BeaconState,
 
 
 def _update_shuffling_seed(state: BeaconState,
-                           slots_per_epoch: int,
-                           min_seed_lookahead: int,
-                           activation_exit_delay: int,
-                           latest_active_index_roots_length: int,
-                           latest_randao_mixes_length: int) -> BeaconState:
+                           committee_config: CommitteeConfig) -> BeaconState:
     """
     Updates the ``current_shuffling_seed`` in the ``state`` given the current state data.
     """
@@ -830,11 +824,7 @@ def _update_shuffling_seed(state: BeaconState,
     current_shuffling_seed = helpers.generate_seed(
         state=state,
         epoch=state.current_shuffling_epoch,
-        slots_per_epoch=slots_per_epoch,
-        min_seed_lookahead=min_seed_lookahead,
-        activation_exit_delay=activation_exit_delay,
-        latest_active_index_roots_length=latest_active_index_roots_length,
-        latest_randao_mixes_length=latest_randao_mixes_length,
+        committee_config=committee_config,
     )
     return state.copy(
         current_shuffling_seed=current_shuffling_seed,
@@ -966,14 +956,7 @@ def _process_validator_registry_with_update(current_epoch_committee_count: int,
 
     state = _update_shuffling_epoch(state, config.SLOTS_PER_EPOCH)
 
-    state = _update_shuffling_seed(
-        state,
-        config.SLOTS_PER_EPOCH,
-        config.MIN_SEED_LOOKAHEAD,
-        config.ACTIVATION_EXIT_DELAY,
-        config.LATEST_ACTIVE_INDEX_ROOTS_LENGTH,
-        config.LATEST_RANDAO_MIXES_LENGTH,
-    )
+    state = _update_shuffling_seed(state, CommitteeConfig(config))
 
     return state
 
@@ -996,14 +979,7 @@ def _process_validator_registry_without_update(state: BeaconState,
         # produced a full set of new crosslinks; validators should have a chance to
         # complete this goal in future epochs.
 
-        state = _update_shuffling_seed(
-            state,
-            config.SLOTS_PER_EPOCH,
-            config.MIN_SEED_LOOKAHEAD,
-            config.ACTIVATION_EXIT_DELAY,
-            config.LATEST_ACTIVE_INDEX_ROOTS_LENGTH,
-            config.LATEST_RANDAO_MIXES_LENGTH,
-        )
+        state = _update_shuffling_seed(state, CommitteeConfig(config))
 
     return state
 
@@ -1041,18 +1017,13 @@ def _update_latest_active_index_roots(state: BeaconState,
     """
     next_epoch = state.next_epoch(committee_config.SLOTS_PER_EPOCH)
 
-    # TODO: chanege to hash_tree_root
     active_validator_indices = get_active_validator_indices(
         state.validator_registry,
         Epoch(next_epoch + committee_config.ACTIVATION_EXIT_DELAY),
     )
-    index_root = hash_eth2(
-        b''.join(
-            [
-                index.to_bytes(32, 'little')
-                for index in active_validator_indices
-            ]
-        )
+    index_root = ssz.hash_tree_root(
+        active_validator_indices,
+        ssz.sedes.List(ssz.uint64),
     )
 
     latest_active_index_roots = update_tuple_item(
@@ -1191,9 +1162,8 @@ def _update_historical_roots(state: BeaconState,
         historical_batch = HistoricalBatch(
             block_roots=state.latest_block_roots,
             state_roots=state.latest_state_roots,
-            slots_per_historical_root=config.SLOTS_PER_HISTORICAL_ROOT,
         )
-        updated_historical_roots += (historical_batch.hash_tree_root,)
+        updated_historical_roots += (historical_batch.root,)
 
     return state.copy(
         historical_roots=updated_historical_roots

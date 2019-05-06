@@ -108,13 +108,6 @@ class TooManyTimeouts(BaseP2PError):
     pass
 
 
-class NoMatchingPeerCapabilities(BaseP2PError):
-    """
-    Raised when no matching protocol between peers was found.
-    """
-    pass
-
-
 class RemoteDisconnected(BaseP2PError):
     """
     Raised when a remote disconnected.
@@ -193,12 +186,5 @@ class AlreadyWaitingDiscoveryResponse(BaseP2PError):
 class UnableToGetDiscV5Ticket(BaseP2PError):
     """
     Raised when we're unable to get a discv5 ticket from a remote peer.
-    """
-    pass
-
-
-class BadDatabaseError(BaseP2PError):
-    """
-    The local database wasn't in quite the format we were expecting
     """
     pass

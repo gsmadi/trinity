@@ -8,7 +8,7 @@ from eth2.beacon.constants import (
     EMPTY_SIGNATURE,
 )
 from eth2.beacon.types.blocks import BeaconBlock
-from eth2.beacon.types.crosslink_records import CrosslinkRecord
+from eth2.beacon.types.crosslinks import Crosslink
 from eth2.beacon.types.eth1_data import Eth1Data
 from eth2.beacon.on_genesis import (
     get_genesis_block,
@@ -49,19 +49,11 @@ def test_get_genesis_beacon_state(
         genesis_fork_version,
         genesis_start_shard,
         shard_count,
-        min_seed_lookahead,
         slots_per_historical_root,
-        latest_active_index_roots_length,
-        slots_per_epoch,
-        max_deposit_amount,
         latest_slashed_exit_length,
         latest_randao_mixes_length,
-        activation_exit_delay,
         config,
-        keymap,
-        deposit_contract_tree_depth,
-        sample_eth1_data_params,
-        sample_genesis_block_class):
+        keymap):
     validator_count = 5
 
     genesis_validator_deposits, deposit_root = create_mock_genesis_validator_deposits_and_root(
@@ -81,21 +73,7 @@ def test_get_genesis_beacon_state(
         genesis_validator_deposits=genesis_validator_deposits,
         genesis_time=genesis_time,
         genesis_eth1_data=genesis_eth1_data,
-        genesis_epoch=genesis_epoch,
-        genesis_slot=genesis_slot,
-        genesis_fork_version=genesis_fork_version,
-        genesis_start_shard=genesis_start_shard,
-        shard_count=shard_count,
-        min_seed_lookahead=min_seed_lookahead,
-        slots_per_historical_root=slots_per_historical_root,
-        latest_active_index_roots_length=latest_active_index_roots_length,
-        slots_per_epoch=slots_per_epoch,
-        max_deposit_amount=max_deposit_amount,
-        latest_slashed_exit_length=latest_slashed_exit_length,
-        latest_randao_mixes_length=latest_randao_mixes_length,
-        activation_exit_delay=activation_exit_delay,
-        deposit_contract_tree_depth=deposit_contract_tree_depth,
-        block_class=sample_genesis_block_class,
+        config=config,
     )
 
     # Misc
@@ -128,7 +106,7 @@ def test_get_genesis_beacon_state(
 
     # Recent state
     assert len(state.latest_crosslinks) == shard_count
-    assert state.latest_crosslinks[0] == CrosslinkRecord(
+    assert state.latest_crosslinks[0] == Crosslink(
         epoch=genesis_epoch,
         crosslink_data_root=ZERO_HASH32,
     )

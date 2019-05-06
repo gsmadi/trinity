@@ -1,4 +1,6 @@
+import signal
 import sys
+
 import pexpect
 import pytest
 
@@ -12,6 +14,7 @@ from eth.constants import (
 
 from tests.integration.helpers import (
     run_command_and_detect_errors,
+    scan_for_errors,
 )
 
 from trinity._utils.async_iter import (
@@ -119,6 +122,9 @@ async def test_web3(command, async_process_runner):
         "Started DB server process",
         "Started networking process",
         "IPC started at",
+        # Ensure we do not start making requests that depend on the networking
+        # process, before it is connected to the JSON-RPC-API
+        "EventBus Endpoint networking connecting to other Endpoint bjson-rpc-api",
     })
 
     attached_trinity = pexpect.spawn('trinity', ['attach'], logfile=sys.stdout, encoding="utf-8")
@@ -173,3 +179,35 @@ async def test_logger(async_process_runner, command, expected_to_contain_log):
         "DiscoveryProtocol  >>> ping",
     })
     assert actually_contains_log == expected_to_contain_log
+
+
+@pytest.mark.parametrize(
+    'command',
+    (
+        ('trinity', ),
+    )
+)
+@pytest.mark.asyncio
+# Once we get Trinity to shutdown cleanly, we should remove the xfail so that the test ensures
+# ongoing clean exits.
+@pytest.mark.xfail
+async def test_shutdown(command, async_process_runner):
+
+    async def run_then_shutdown_and_yield_output():
+        await async_process_runner.run(command, timeout_sec=30)
+
+        # Somewhat arbitrary but we wait until the syncer starts before we trigger the shutdown.
+        # At this point, most of the internals should be set up, leaving us with more room for
+        # failure which is what we are looking for in this test.
+        trigger = "FastChainBodySyncer"
+        triggered = False
+        async for line in async_process_runner.stderr:
+            if trigger in line:
+                triggered = True
+                async_process_runner.kill(signal.SIGINT)
+
+            # We are only interested in the output that is created after we initiate the shutdown
+            if triggered:
+                yield line
+
+    await scan_for_errors(run_then_shutdown_and_yield_output())

@@ -8,7 +8,7 @@ import struct
 import time
 from typing import (
     Any,
-    cast,
+    Dict,
     Iterable,
     Iterator,
     List,
@@ -133,7 +133,6 @@ class Node:
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, self.__class__):
             return super().__eq__(other)
-        other = cast(Node, other)
         return self.pubkey == other.pubkey
 
     def __ne__(self, other: object) -> bool:
@@ -142,18 +141,13 @@ class Node:
     def __hash__(self) -> int:
         return hash(self.pubkey)
 
-# TODO: check if we can make the nodes pickable and get rid of these
-# https://github.com/ethereum/py-evm/issues/1578
+    def __getstate__(self) -> Dict[Any, Any]:
+        return {'enode': self.uri()}
 
-
-def to_uris(nodes: Iterable[Node]) -> Iterator[str]:
-    for node in nodes:
-        yield node.uri()
-
-
-def from_uris(uris: Iterable[str]) -> Iterator[Node]:
-    for uri in uris:
-        yield Node.from_uri(uri)
+    def __setstate__(self, state: Dict[Any, Any]) -> None:
+        enode = state.pop('enode')
+        node = self.from_uri(enode)
+        self.__dict__.update(node.__dict__)
 
 
 @total_ordering
@@ -339,7 +333,7 @@ class RoutingTable:
         # nodes and sort it by distance_to.
         for bucket in self.buckets_by_distance_to(node_id):
             for n in bucket.nodes_by_distance_to(node_id):
-                if n is not node_id:
+                if n.id is not node_id:
                     nodes.append(n)
                     if len(nodes) == k * 2:
                         break

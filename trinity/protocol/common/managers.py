@@ -17,7 +17,10 @@ from eth_utils import (
     ValidationError,
 )
 
+from p2p._utils import ensure_global_asyncio_executor
+from p2p.constants import BLACKLIST_SECONDS_TOO_MANY_TIMEOUTS
 from p2p.exceptions import PeerConnectionLost
+from p2p.p2p_proto import DisconnectReason
 from p2p.peer import BasePeer, PeerSubscriber
 from p2p.protocol import (
     BaseRequest,
@@ -25,11 +28,16 @@ from p2p.protocol import (
     TRequestPayload,
 )
 from p2p.service import BaseService
-from p2p._utils import ensure_global_asyncio_executor
+from p2p.token_bucket import TokenBucket, NotEnoughTokens
 
 from trinity.exceptions import AlreadyWaiting
 
-from .constants import ROUND_TRIP_TIMEOUT, NUM_QUEUED_REQUESTS
+from .constants import (
+    ROUND_TRIP_TIMEOUT,
+    NUM_QUEUED_REQUESTS,
+    TIMEOUT_BUCKET_CAPACITY,
+    TIMEOUT_BUCKET_RATE,
+)
 from .normalizers import BaseNormalizer
 from .trackers import BasePerformanceTracker
 from .types import (
@@ -68,6 +76,11 @@ class ResponseCandidateStream(
         self.response_msg_type = response_msg_type
         self._lock = asyncio.Lock()
 
+        # token bucket for limiting timeouts.
+        # - Refills at 1-token every 5 minutes
+        # - Max capacity of 3 tokens
+        self.timeout_bucket = TokenBucket(TIMEOUT_BUCKET_RATE, TIMEOUT_BUCKET_CAPACITY)
+
     async def payload_candidates(
             self,
             request: BaseRequest[TRequestPayload],
@@ -80,12 +93,12 @@ class ResponseCandidateStream(
         To mark a response as valid, use `complete_request`. After that call, payload
         candidates will stop arriving.
         """
-        outer_timeout = self.response_timeout if timeout is None else timeout
+        total_timeout = self.response_timeout if timeout is None else timeout
 
         # The _lock ensures that we never have two concurrent requests to a
         # single peer for a single command pair in flight.
         try:
-            await self.wait(self._lock.acquire(), timeout=outer_timeout * NUM_QUEUED_REQUESTS)
+            await self.wait(self._lock.acquire(), timeout=total_timeout * NUM_QUEUED_REQUESTS)
         except TimeoutError:
             raise AlreadyWaiting(
                 f"Timed out waiting for {self.response_msg_name} request lock "
@@ -94,32 +107,34 @@ class ResponseCandidateStream(
 
         start_at = time.perf_counter()
 
-        if timeout is not None or tracker.total_msgs < 20:
-            inner_timeout = outer_timeout
-        else:
-            # We compute a timeout based on the historical performance
-            # of the peer defined as three standard deviations above
-            # the response time for the 99th percentile of requests.
-            try:
-                rtt_99th = tracker.round_trip_99th.value
-                rtt_stddev = tracker.round_trip_stddev.value
-            except ValueError:
-                inner_timeout = outer_timeout
-            else:
-                inner_timeout = rtt_99th + 3 * rtt_stddev
-
         try:
             self._request(request)
             while self._is_pending():
-                timeout_remaining = max(0, outer_timeout - (time.perf_counter() - start_at))
-
-                payload_timeout = min(inner_timeout, timeout_remaining)
+                timeout_remaining = max(0, total_timeout - (time.perf_counter() - start_at))
 
                 try:
-                    yield await self._get_payload(payload_timeout)
-                except TimeoutError:
+                    yield await self._get_payload(timeout_remaining)
+                except TimeoutError as err:
                     tracker.record_timeout()
-                    raise
+
+                    # If the peer has timeoud out too many times, desconnect
+                    # and blacklist them
+                    try:
+                        self.timeout_bucket.take_nowait()
+                    except NotEnoughTokens:
+                        self.logger.warning(
+                            "Blacklisting and disconnecting from %s due to too many timeouts",
+                            self._peer,
+                        )
+                        self._peer.connection_tracker.record_blacklist(
+                            self._peer.remote,
+                            BLACKLIST_SECONDS_TOO_MANY_TIMEOUTS,
+                            f"Too many timeouts: {err}",
+                        )
+                        self._peer.disconnect_nowait(DisconnectReason.timeout)
+                        await self.cancellation()
+                    finally:
+                        raise
         finally:
             self._lock.release()
 
@@ -243,6 +258,15 @@ class ExchangeManager(Generic[TRequestPayload, TResponsePayload, TResult]):
         self._cancel_token = cancel_token
         self._response_command_type = listening_for
 
+        # This TokenBucket allows for the occasional invalid response at a
+        # maximum rate of 1-per-10-minutes and allowing up to two in quick
+        # succession.  We *allow* invalid responses because the ETH protocol
+        # doesn't have strong correlation between request/response and certain
+        # networking conditions can result in us interpreting a legitimate
+        # message as an invalid response if messages arrive out of order or
+        # late.
+        self._invalid_response_bucket = TokenBucket(1 / 600, 2)
+
     async def launch_service(self) -> None:
         if self._cancel_token.triggered:
             raise PeerConnectionLost("Peer %s is gone. Ignoring new requests to it" % self._peer)
@@ -303,7 +327,19 @@ class ExchangeManager(Generic[TRequestPayload, TResponsePayload, TResult]):
                     self._peer,
                     err,
                 )
-                continue
+                try:
+                    self._invalid_response_bucket.take_nowait()
+                except NotEnoughTokens:
+                    self.service.logger.warning(
+                        "Blacklisting and disconnecting from %s due to too many invalid responses",
+                        self._peer,
+                    )
+                    self._peer.disconnect_nowait(DisconnectReason.bad_protocol)
+                    await self.service.cancellation()
+                    # re-raise the outer ValidationError exception
+                    raise err
+                else:
+                    continue
             else:
                 tracker.record_response(
                     stream.last_response_time,

@@ -15,7 +15,7 @@ from eth2.beacon.enums import (
 )
 from eth2.beacon.types.deposits import Deposit
 from eth2.beacon.types.states import BeaconState
-from eth2.beacon.types.validator_records import ValidatorRecord
+from eth2.beacon.types.validators import Validator
 from eth2.beacon.helpers import get_domain
 from eth2.beacon.typing import (
     ValidatorIndex,
@@ -24,7 +24,7 @@ from eth2.beacon.typing import (
 
 
 def add_pending_validator(state: BeaconState,
-                          validator: ValidatorRecord,
+                          validator: Validator,
                           amount: Gwei) -> BeaconState:
     """
     Add a validator to ``state``.
@@ -115,8 +115,8 @@ def process_deposit(state: BeaconState,
         # Verify the proof of possession
         proof_is_valid = bls.verify(
             pubkey=pubkey,
-            message_hash=deposit_input.signed_root,
-            signature=deposit_input.proof_of_possession,
+            message_hash=deposit_input.signing_root,
+            signature=deposit_input.signature,
             domain=get_domain(
                 state.fork,
                 state.current_epoch(slots_per_epoch),
@@ -126,7 +126,7 @@ def process_deposit(state: BeaconState,
         if not proof_is_valid:
             return state
 
-        validator = ValidatorRecord.create_pending_validator(
+        validator = Validator.create_pending_validator(
             pubkey=pubkey,
             withdrawal_credentials=withdrawal_credentials,
         )

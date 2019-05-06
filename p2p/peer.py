@@ -1,16 +1,10 @@
+from abc import ABC, abstractmethod
 import asyncio
 import collections
 import contextlib
-import datetime
 import functools
 import logging
-import operator
 import struct
-from abc import (
-    ABC,
-    abstractmethod
-)
-
 from typing import (
     Any,
     cast,
@@ -23,7 +17,8 @@ from typing import (
     Type,
     TYPE_CHECKING,
 )
-import typing_extensions
+
+from lahja import Endpoint
 
 import sha3
 
@@ -43,7 +38,18 @@ from eth_keys import datatypes
 from cancel_token import CancelToken
 
 from p2p import auth
-from p2p import protocol
+from p2p._utils import (
+    get_devp2p_cmd_id,
+    roundup_16,
+    sxor,
+)
+from p2p.protocol import (
+    match_protocols_with_capabilities,
+    Command,
+    PayloadType,
+    Protocol,
+    CapabilitiesType,
+)
 from p2p.kademlia import (
     Node,
 )
@@ -51,20 +57,12 @@ from p2p.exceptions import (
     DecryptionError,
     HandshakeFailure,
     MalformedMessage,
-    NoMatchingPeerCapabilities,
     PeerConnectionLost,
     RemoteDisconnected,
     TooManyPeersFailure,
     UnexpectedMessage,
     UnknownProtocolCommand,
     UnreachablePeer,
-)
-from p2p.service import BaseService
-from p2p._utils import (
-    get_devp2p_cmd_id,
-    roundup_16,
-    sxor,
-    time_since,
 )
 from p2p.p2p_proto import (
     Disconnect,
@@ -74,11 +72,17 @@ from p2p.p2p_proto import (
     Ping,
     Pong,
 )
+from p2p.service import BaseService
+from p2p.tracking.connection import (
+    BaseConnectionTracker,
+    NoopConnectionTracker,
+)
 
 from .constants import (
     CONN_IDLE_TIMEOUT,
     HEADER_LEN,
     MAC_LEN,
+    BLACKLIST_SECONDS_BAD_PROTOCOL,
     SNAPPY_PROTOCOL_VERSION,
 )
 
@@ -166,21 +170,6 @@ class BasePeerContext:
     pass
 
 
-class IdentifiablePeer(typing_extensions.Protocol):
-    """
-    A protocol used to identify a peer based on the presence of an ``uri`` property. The
-    peer pool uses this to lookup and match DTO peers against the actual real peer instance.
-    The ``BaseDTOPeer`` qualifies for this protocol but usage of the ``BaseDTOPeer`` isn't
-    strictly needed. E.g. one might implement a different DTO class that derives from
-    ``NamedTuple`` which is fine as long as it defines an ``uri`` property.
-    """
-
-    @property
-    @abstractmethod
-    def uri(self) -> str:
-        pass
-
-
 class BaseDTOPeer:
     """
     A peer solely meant as a Data Transfer Object (DTO) to travel across process boundaries.
@@ -196,12 +185,14 @@ class BasePeer(BaseService):
     conn_idle_timeout = CONN_IDLE_TIMEOUT
     # Must be defined in subclasses. All items here must be Protocol classes representing
     # different versions of the same P2P sub-protocol (e.g. ETH, LES, etc).
-    _supported_sub_protocols: List[Type[protocol.Protocol]] = []
+    supported_sub_protocols: Tuple[Type[Protocol], ...] = ()
     # FIXME: Must be configurable.
     listen_port = 30303
     # Will be set upon the successful completion of a P2P handshake.
-    sub_proto: protocol.Protocol = None
+    sub_proto: Protocol = None
     disconnect_reason: DisconnectReason = None
+
+    _event_bus: Endpoint = None
 
     def __init__(self,
                  remote: Node,
@@ -209,6 +200,7 @@ class BasePeer(BaseService):
                  connection: PeerConnection,
                  context: BasePeerContext,
                  inbound: bool = False,
+                 event_bus: Endpoint = None,
                  token: CancelToken = None,
                  ) -> None:
         super().__init__(token)
@@ -232,6 +224,9 @@ class BasePeer(BaseService):
         # snappy compression
         self.base_protocol = P2PProtocol(self, snappy_support=False)
 
+        # Optional event bus handle
+        self._event_bus = event_bus
+
         # Flag indicating whether the connection this peer represents was
         # established from a dial-out or dial-in (True: dial-in, False:
         # dial-out)
@@ -239,14 +234,9 @@ class BasePeer(BaseService):
         self.inbound = inbound
         self._subscribers: List[PeerSubscriber] = []
 
-        # Uptime tracker for how long the peer has been running.
-        # TODO: this should move to begin within the `_run` method (or maybe as
-        # part of the `BaseService` API)
-        self.start_time = datetime.datetime.now()
-
         # A counter of the number of messages this peer has received for each
         # message type.
-        self.received_msgs: Dict[protocol.Command, int] = collections.defaultdict(int)
+        self.received_msgs: Dict[Command, int] = collections.defaultdict(int)
 
         # Encryption and Cryptography *stuff*
         self.egress_mac = connection.egress_mac
@@ -263,6 +253,23 @@ class BasePeer(BaseService):
 
         # Manages the boot process
         self.boot_manager = self.get_boot_manager()
+        self.connection_tracker = self.setup_connection_tracker()
+
+    @property
+    def has_event_bus(self) -> bool:
+        return self._event_bus is not None
+
+    def get_event_bus(self) -> Endpoint:
+        if self._event_bus is None:
+            raise AttributeError(f"No event bus configured for peer {self}")
+        return self._event_bus
+
+    def setup_connection_tracker(self) -> BaseConnectionTracker:
+        """
+        Return an instance of `p2p.tracking.connection.BaseConnectionTracker`
+        which will be used to track peer connection failures.
+        """
+        return NoopConnectionTracker()
 
     def get_extra_stats(self) -> List[str]:
         return []
@@ -280,7 +287,7 @@ class BasePeer(BaseService):
 
     @abstractmethod
     async def process_sub_proto_handshake(
-            self, cmd: protocol.Command, msg: protocol.PayloadType) -> None:
+            self, cmd: Command, msg: PayloadType) -> None:
         pass
 
     @contextlib.contextmanager
@@ -298,10 +305,6 @@ class BasePeer(BaseService):
     @property
     def received_msgs_count(self) -> int:
         return sum(self.received_msgs.values())
-
-    @property
-    def uptime(self) -> str:
-        return '%d:%02d:%02d:%02d' % time_since(self.start_time)
 
     def add_subscriber(self, subscriber: 'PeerSubscriber') -> None:
         self._subscribers.append(subscriber)
@@ -358,10 +361,10 @@ class BasePeer(BaseService):
         await self.process_p2p_handshake(cmd, msg)
 
     @property
-    def capabilities(self) -> List[Tuple[str, int]]:
-        return [(klass.name, klass.version) for klass in self._supported_sub_protocols]
+    def capabilities(self) -> CapabilitiesType:
+        return tuple(proto.as_capability() for proto in self.supported_sub_protocols)
 
-    def get_protocol_command_for(self, msg: bytes) -> protocol.Command:
+    def get_protocol_command_for(self, msg: bytes) -> Command:
         """Return the Command corresponding to the cmd_id encoded in the given msg."""
         cmd_id = get_devp2p_cmd_id(msg)
         self.logger.debug2("Got msg with cmd_id: %s", cmd_id)
@@ -426,7 +429,7 @@ class BasePeer(BaseService):
                 self.logger.debug("%r disconnected: %s", self, e)
                 return
 
-    async def read_msg(self) -> Tuple[protocol.Command, protocol.PayloadType]:
+    async def read_msg(self) -> Tuple[Command, PayloadType]:
         header_data = await self.read(HEADER_LEN + MAC_LEN)
         try:
             header = self.decrypt_header(header_data)
@@ -467,7 +470,7 @@ class BasePeer(BaseService):
             self.received_msgs[cmd] += 1
             return cmd, decoded_msg
 
-    def handle_p2p_msg(self, cmd: protocol.Command, msg: protocol.PayloadType) -> None:
+    def handle_p2p_msg(self, cmd: Command, msg: PayloadType) -> None:
         """Handle the base protocol (P2P) messages."""
         if isinstance(cmd, Disconnect):
             msg = cast(Dict[str, Any], msg)
@@ -481,7 +484,7 @@ class BasePeer(BaseService):
         else:
             raise UnexpectedMessage(f"Unexpected msg: {cmd} ({msg})")
 
-    def handle_sub_proto_msg(self, cmd: protocol.Command, msg: protocol.PayloadType) -> None:
+    def handle_sub_proto_msg(self, cmd: Command, msg: PayloadType) -> None:
         cmd_type = type(cmd)
 
         if self._subscribers:
@@ -499,14 +502,14 @@ class BasePeer(BaseService):
         else:
             self.logger.warning("Peer %s has no subscribers, discarding %s msg", self, cmd)
 
-    def process_msg(self, cmd: protocol.Command, msg: protocol.PayloadType) -> None:
+    def process_msg(self, cmd: Command, msg: PayloadType) -> None:
         if cmd.is_base_protocol:
             self.handle_p2p_msg(cmd, msg)
         else:
             self.handle_sub_proto_msg(cmd, msg)
 
     async def process_p2p_handshake(
-            self, cmd: protocol.Command, msg: protocol.PayloadType) -> None:
+            self, cmd: Command, msg: PayloadType) -> None:
         msg = cast(Dict[str, Any], msg)
         if not isinstance(cmd, Hello):
             await self.disconnect(DisconnectReason.bad_protocol)
@@ -532,9 +535,23 @@ class BasePeer(BaseService):
             self.base_protocol = P2PProtocol(self, snappy_support=snappy_support)
 
         remote_capabilities = msg['capabilities']
-        try:
-            self.sub_proto = self.select_sub_protocol(remote_capabilities, snappy_support)
-        except NoMatchingPeerCapabilities:
+        matched_proto_classes = match_protocols_with_capabilities(
+            self.supported_sub_protocols,
+            remote_capabilities,
+        )
+        if len(matched_proto_classes) == 1:
+            self.sub_proto = matched_proto_classes[0](
+                self,
+                self.base_protocol.cmd_length,
+                snappy_support,
+            )
+        elif len(matched_proto_classes) > 1:
+            raise NotImplementedError(
+                f"Peer {self.remote} connection matched on multiple protocols "
+                f"{matched_proto_classes}.  Support for multiple protocols is not "
+                f"yet supported"
+            )
+        else:
             await self.disconnect(DisconnectReason.useless_peer)
             raise HandshakeFailure(
                 f"No matching capabilities between us ({self.capabilities}) and {self.remote} "
@@ -623,6 +640,14 @@ class BasePeer(BaseService):
             raise ValueError(
                 f"Reason must be an item of DisconnectReason, got {reason}"
             )
+
+        if reason is DisconnectReason.bad_protocol:
+            self.connection_tracker.record_blacklist(
+                self.remote,
+                timeout_seconds=BLACKLIST_SECONDS_BAD_PROTOCOL,
+                reason="Bad protocol",
+            )
+
         self.logger.debug("Disconnecting from remote peer %s; reason: %s", self.remote, reason.name)
         self.base_protocol.send_disconnect(reason.value)
         self.disconnect_reason = reason
@@ -647,28 +672,6 @@ class BasePeer(BaseService):
         if self.is_operational:
             self.cancel_nowait()
 
-    def select_sub_protocol(self,
-                            remote_capabilities: List[Tuple[bytes, int]],
-                            snappy_support: bool) -> protocol.Protocol:
-        """Select the sub-protocol to use when talking to the remote.
-
-        Find the highest version of our supported sub-protocols that is also supported by the
-        remote and stores an instance of it (with the appropriate cmd_id offset) in
-        self.sub_proto.
-
-        Raises NoMatchingPeerCapabilities if none of our supported protocols match one of the
-        remote's protocols.
-        """
-        matching_capabilities = set(self.capabilities).intersection(remote_capabilities)
-        if not matching_capabilities:
-            raise NoMatchingPeerCapabilities()
-        _, highest_matching_version = max(matching_capabilities, key=operator.itemgetter(1))
-        offset = self.base_protocol.cmd_length
-        for proto_class in self._supported_sub_protocols:
-            if proto_class.version == highest_matching_version:
-                return proto_class(self, offset, snappy_support)
-        raise NoMatchingPeerCapabilities()
-
     def __str__(self) -> str:
         return f"{self.__class__.__name__} {self.remote}"
 
@@ -681,8 +684,8 @@ class BasePeer(BaseService):
 
 class PeerMessage(NamedTuple):
     peer: BasePeer
-    command: protocol.Command
-    payload: protocol.PayloadType
+    command: Command
+    payload: PayloadType
 
 
 class PeerSubscriber(ABC):
@@ -694,7 +697,7 @@ class PeerSubscriber(ABC):
 
     @property
     @abstractmethod
-    def subscription_msg_types(self) -> FrozenSet[Type[protocol.Command]]:
+    def subscription_msg_types(self) -> FrozenSet[Type[Command]]:
         """
         The :class:`p2p.protocol.Command` types that this class subscribes to. Any
         command which is not in this set will not be passed to this subscriber.
@@ -709,9 +712,9 @@ class PeerSubscriber(ABC):
         pass
 
     @functools.lru_cache(maxsize=64)
-    def is_subscription_command(self, cmd_type: Type[protocol.Command]) -> bool:
+    def is_subscription_command(self, cmd_type: Type[Command]) -> bool:
         return bool(self.subscription_msg_types.intersection(
-            {cmd_type, protocol.Command}
+            {cmd_type, Command}
         ))
 
     @property
@@ -829,7 +832,7 @@ class PeerSubscriber(ABC):
 class MsgBuffer(PeerSubscriber):
     logger = logging.getLogger('p2p.peer.MsgBuffer')
     msg_queue_maxsize = 500
-    subscription_msg_types = frozenset({protocol.Command})
+    subscription_msg_types = frozenset({Command})
 
     @to_tuple
     def get_messages(self) -> Iterator[PeerMessage]:
@@ -846,10 +849,12 @@ class BasePeerFactory(ABC):
     def __init__(self,
                  privkey: datatypes.PrivateKey,
                  context: BasePeerContext,
-                 token: CancelToken) -> None:
+                 token: CancelToken,
+                 event_bus: Endpoint = None) -> None:
         self.privkey = privkey
         self.context = context
         self.cancel_token = token
+        self.event_bus = event_bus
 
     def create_peer(self,
                     remote: Node,
@@ -861,5 +866,6 @@ class BasePeerFactory(ABC):
             connection=connection,
             context=self.context,
             inbound=inbound,
+            event_bus=self.event_bus,
             token=self.cancel_token,
         )
