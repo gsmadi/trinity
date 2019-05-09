@@ -40,7 +40,8 @@ class PeerCountReporterPlugin(BaseIsolatedPlugin):
     def name(self) -> str:
         return "Peer Count Reporter"
 
-    def configure_parser(self,
+    @classmethod
+    def configure_parser(cls,
                          arg_parser: ArgumentParser,
                          subparser: _SubParsersAction) -> None:
         arg_parser.add_argument(
@@ -50,13 +51,10 @@ class PeerCountReporterPlugin(BaseIsolatedPlugin):
         )
 
     def on_ready(self, manager_eventbus: TrinityEventBusEndpoint) -> None:
-        if self.context.args.report_peer_count:
+        if self.boot_info.args.report_peer_count:
             self.start()
 
     def do_start(self) -> None:
-        loop = asyncio.get_event_loop()
         service = PeerCountReporter(self.event_bus)
         asyncio.ensure_future(exit_with_endpoint_and_services(self.event_bus, service))
         asyncio.ensure_future(service.run())
-        loop.run_forever()
-        loop.close()

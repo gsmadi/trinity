@@ -8,6 +8,7 @@ deps = {
     'p2p': [
         "asyncio-cancel-token==0.1.0a2",
         "async_lru>=0.1.0,<1.0.0",
+        "cached-property>=1.5.1,<2",
         # cryptography does not use semver and allows breaking changes within `0.3` version bumps.
         "cryptography>=2.5,<2.7",
         "eth-hash>=0.1.4,<1",
@@ -26,13 +27,14 @@ deps = {
         "plyvel==1.0.5",
         "py-evm==0.2.0a42",
         "web3==4.4.1",
-        "lahja==0.11.2",
+        "lahja==0.12.0",
         "termcolor>=1.1.0,<2.0.0",
         "uvloop==0.11.2;platform_system=='Linux' or platform_system=='Darwin' or platform_system=='FreeBSD'",  # noqa: E501
         "websockets==5.0.1",
         "jsonschema==3.0.1",
         "mypy_extensions>=0.4.1,<1.0.0",
         "typing_extensions>=3.7.2,<4.0.0",
+        "ruamel.yaml>=0.15.87",
     ],
     'test': [
         "hypothesis==3.69.5",
