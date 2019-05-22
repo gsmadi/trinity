@@ -42,7 +42,7 @@ from eth2.beacon.types.forks import Fork
 from eth2.beacon.types.slashable_attestations import SlashableAttestation
 from eth2.beacon.types.states import BeaconState
 
-from tests.eth2.beacon.helpers import mock_validator_record
+from eth2.beacon.tools.builder.initializer import mock_validator
 
 
 @pytest.mark.parametrize(
@@ -91,14 +91,13 @@ def test_validate_proposer_signature(
         is_valid_signature,
         sample_beacon_block_params,
         sample_beacon_state_params,
-        beacon_chain_shard_number,
         target_committee_size,
         max_deposit_amount,
         config):
 
     state = BeaconState(**sample_beacon_state_params).copy(
         validator_registry=tuple(
-            mock_validator_record(proposer_pubkey, config)
+            mock_validator(proposer_pubkey, config)
             for _ in range(10)
         ),
         validator_balances=(max_deposit_amount,) * 10,
@@ -127,7 +126,6 @@ def test_validate_proposer_signature(
         validate_proposer_signature(
             state,
             proposed_block,
-            beacon_chain_shard_number,
             CommitteeConfig(config),
         )
     else:
@@ -135,7 +133,6 @@ def test_validate_proposer_signature(
             validate_proposer_signature(
                 state,
                 proposed_block,
-                beacon_chain_shard_number,
                 CommitteeConfig(config),
             )
 

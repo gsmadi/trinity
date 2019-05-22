@@ -28,6 +28,7 @@ from trinity.protocol.bcc.commands import (
     NewBeaconBlock,
     NewBeaconBlockMessage,
     Attestations,
+    AttestationsMessage,
 )
 
 from trinity._utils.logging import HasExtendedDebugLogger
@@ -51,13 +52,13 @@ class BCCProtocol(HasExtendedDebugLogger, Protocol):
     peer: "BCCPeer"
 
     def send_handshake(self,
-                       genesis_hash: Hash32,
+                       genesis_root: Hash32,
                        head_slot: Slot,
                        network_id: int) -> None:
         resp = StatusMessage(
             protocol_version=self.version,
             network_id=network_id,
-            genesis_hash=genesis_hash,
+            genesis_root=genesis_root,
             head_slot=head_slot,
         )
         cmd = Status(self.cmd_id_offset, self.snappy_support)
@@ -86,7 +87,9 @@ class BCCProtocol(HasExtendedDebugLogger, Protocol):
 
     def send_attestation_records(self, attestations: Tuple[Attestation, ...]) -> None:
         cmd = Attestations(self.cmd_id_offset, self.snappy_support)
-        header, body = cmd.encode(tuple(ssz.encode(attestation) for attestation in attestations))
+        header, body = cmd.encode(AttestationsMessage(
+            encoded_attestations=tuple(ssz.encode(attestation) for attestation in attestations)),
+        )
         self.transport.send(header, body)
 
     def send_new_block(self, block: BaseBeaconBlock) -> None:

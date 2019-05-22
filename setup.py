@@ -3,6 +3,8 @@
 import os
 from setuptools import setup, find_packages
 
+PYEVM_DEPENDENCY = "py-evm==0.2.0a43"
+
 
 deps = {
     'p2p': [
@@ -25,7 +27,7 @@ deps = {
         "eth-utils>=1.5.1,<2",
         "ipython>=6.2.1,<7.0.0",
         "plyvel==1.0.5",
-        "py-evm==0.2.0a42",
+        PYEVM_DEPENDENCY,
         "web3==4.4.1",
         "lahja==0.12.0",
         "termcolor>=1.1.0,<2.0.0",
@@ -47,8 +49,11 @@ deps = {
         "pytest-cov==2.5.1",
         "pytest-watch>=4.1.0,<5",
         "pytest-xdist==1.18.1",
+        "pytest-mock==1.10.4",
         # only needed for p2p
         "pytest-asyncio-network-simulator==0.1.0a2;python_version>='3.6'",
+        # only for eth2
+        "ruamel.yaml>=0.15.87,<0.16",
     ],
     'lint': [
         "flake8==3.5.0",
@@ -85,13 +90,13 @@ deps = {
         "lru-dict>=1.1.6",
         "py-ecc>=1.6.0,<2.0.0",
         "rlp>=1.1.0,<2.0.0",
-        "py-evm==0.2.0a42",
-        "ssz==0.1.0a7",
+        PYEVM_DEPENDENCY,
+        "ssz==0.1.0a8",
     ],
     'libp2p': [
         "base58>=1.0.3",
         # use the forked multiaddr temporarily until the fixing changes are released
-        "multiaddr @ git+https://git@github.com/mhchia/py-multiaddr@feature/add-unix-proto",
+        "multiaddr>=0.0.7,<0.1.0",
         "protobuf>=3.6.1",
         "pymultihash>=0.8.2",
     ],
@@ -125,7 +130,7 @@ with open('./README.md') as readme:
 setup(
     name='trinity',
     # *IMPORTANT*: Don't manually change the version here. Use the 'bumpversion' utility.
-    version='0.1.0-alpha.23',
+    version='0.1.0-alpha.24',
     description='The Trinity client for the Ethereum network',
     long_description=long_description,
     long_description_content_type='text/markdown',
