@@ -29,7 +29,7 @@ deps = {
         "plyvel==1.0.5",
         PYEVM_DEPENDENCY,
         "web3==4.4.1",
-        "lahja==0.12.0",
+        "lahja@git+https://github.com/ethereum/lahja.git@22396a8fe79809357438e917e66a7101e6e3ac01",  # noqa: E501
         "termcolor>=1.1.0,<2.0.0",
         "uvloop==0.11.2;platform_system=='Linux' or platform_system=='Darwin' or platform_system=='FreeBSD'",  # noqa: E501
         "websockets==5.0.1",
@@ -88,15 +88,14 @@ deps = {
         "eth-typing>=2.1.0,<3.0.0",
         "eth-utils>=1.3.0b0,<2.0.0",
         "lru-dict>=1.1.6",
-        "py-ecc>=1.6.0,<2.0.0",
+        "py-ecc==1.6.0",
         "rlp>=1.1.0,<2.0.0",
         PYEVM_DEPENDENCY,
         "ssz==0.1.0a8",
     ],
     'libp2p': [
         "base58>=1.0.3",
-        # use the forked multiaddr temporarily until the fixing changes are released
-        "multiaddr>=0.0.7,<0.1.0",
+        "multiaddr>=0.0.8,<0.1.0",
         "protobuf>=3.6.1",
         "pymultihash>=0.8.2",
     ],

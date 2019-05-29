@@ -61,6 +61,8 @@ class FakeAsyncBeaconChainDB(BaseAsyncBeaconChainDB, BeaconChainDB):
     coro_persist_block_chain = async_passthrough('persist_block_chain')
     coro_get_state_by_root = async_passthrough('get_state_by_root')
     coro_persist_state = async_passthrough('persist_state')
+    coro_get_attestation_key_by_root = async_passthrough('get_attestation_key_by_root')
+    coro_attestation_exists = async_passthrough('attestation_exists')
     coro_exists = async_passthrough('exists')
     coro_get = async_passthrough('get')
 
@@ -170,15 +172,19 @@ async def get_directly_linked_peers(request, event_loop, alice_chain_db, bob_cha
 async def get_directly_linked_peers_in_peer_pools(request,
                                                   event_loop,
                                                   alice_chain_db,
-                                                  bob_chain_db):
+                                                  bob_chain_db,
+                                                  alice_peer_pool_event_bus=None,
+                                                  bob_peer_pool_event_bus=None):
     alice, bob = await get_directly_linked_peers(
         request,
         event_loop,
         alice_chain_db=alice_chain_db,
         bob_chain_db=bob_chain_db,
     )
-    alice_peer_pool = BCCPeerPool(alice.transport._private_key, alice.context)
-    bob_peer_pool = BCCPeerPool(bob.transport._private_key, bob.context)
+    alice_peer_pool = BCCPeerPool(
+        alice.transport._private_key, alice.context, event_bus=alice_peer_pool_event_bus)
+    bob_peer_pool = BCCPeerPool(
+        bob.transport._private_key, bob.context, event_bus=bob_peer_pool_event_bus)
 
     asyncio.ensure_future(alice_peer_pool.run())
     asyncio.ensure_future(bob_peer_pool.run())

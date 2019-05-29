@@ -29,7 +29,7 @@ from eth_utils.toolz import (
     take,
 )
 from lahja import (
-    Endpoint,
+    AsyncioEndpoint,
     BroadcastConfig,
 )
 
@@ -106,14 +106,14 @@ class BasePeerPool(BaseService, AsyncIterable[BasePeer]):
     """
     _report_interval = 60
     _peer_boot_timeout = DEFAULT_PEER_BOOT_TIMEOUT
-    _event_bus: Endpoint = None
+    _event_bus: AsyncioEndpoint = None
 
     def __init__(self,
                  privkey: datatypes.PrivateKey,
                  context: BasePeerContext,
                  max_peers: int = DEFAULT_MAX_PEERS,
                  token: CancelToken = None,
-                 event_bus: Endpoint = None,
+                 event_bus: AsyncioEndpoint = None,
                  ) -> None:
         super().__init__(token)
 
@@ -135,7 +135,7 @@ class BasePeerPool(BaseService, AsyncIterable[BasePeer]):
     def has_event_bus(self) -> bool:
         return self._event_bus is not None
 
-    def get_event_bus(self) -> Endpoint:
+    def get_event_bus(self) -> AsyncioEndpoint:
         if self._event_bus is None:
             raise AttributeError("No event bus configured for this peer pool")
         return self._event_bus
@@ -260,7 +260,7 @@ class BasePeerPool(BaseService, AsyncIterable[BasePeer]):
             await peer.disconnect(DisconnectReason.timeout)
             return
         except HandshakeFailure as err:
-            await self.connection_tracker.record_failure(peer.remote, err)
+            self.connection_tracker.record_failure(peer.remote, err)
             raise
         else:
             if not peer.is_operational:
@@ -353,7 +353,7 @@ class BasePeerPool(BaseService, AsyncIterable[BasePeer]):
             raise
         except HandshakeFailure as e:
             self.logger.debug("Could not complete handshake with %r: %s", remote, repr(e))
-            await self.connection_tracker.record_failure(remote, e)
+            self.connection_tracker.record_failure(remote, e)
             raise
         except COMMON_PEER_CONNECTION_EXCEPTIONS as e:
             self.logger.debug("Could not complete handshake with %r: %s", remote, repr(e))
