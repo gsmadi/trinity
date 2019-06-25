@@ -10,6 +10,9 @@ from async_generator import (
 from cancel_token import OperationCancelled
 from eth_keys import keys
 from eth_utils import decode_hex
+from eth_utils.toolz import (
+    curry,
+)
 
 from eth import MainnetChain, RopstenChain, constants
 from eth.chains.base import (
@@ -21,12 +24,13 @@ from eth.db.atomic import AtomicDB
 from eth.db.chain import ChainDB
 from eth.tools.builder.chain import (
     build,
-    byzantium_at,
     enable_pow_mining,
     genesis,
+    latest_mainnet_at,
 )
 from eth.db.header import HeaderDB
 from eth.vm.forks.byzantium import ByzantiumVM
+from eth.vm.forks.petersburg import PetersburgVM
 
 from trinity.constants import TO_NETWORKING_BROADCAST_CONFIG
 from trinity.db.base import BaseAsyncDB
@@ -36,11 +40,26 @@ from trinity.db.eth1.header import BaseAsyncHeaderDB
 from trinity.protocol.common.peer_pool_event_bus import (
     DefaultPeerPoolEventServer,
 )
+from trinity.protocol.eth.peer import (
+    ETHProxyPeerPool,
+)
 from trinity.protocol.eth.servers import (
     ETHRequestServer,
 )
 
 ZIPPED_FIXTURES_PATH = Path(__file__).parent.parent / 'integration' / 'fixtures'
+
+
+@curry
+async def mock_request_response(request_type, response, bus):
+    async for req in bus.stream(request_type):
+        await bus.broadcast(response, req.broadcast_config())
+        break
+
+
+@curry
+def run_mock_request_response(request_type, response, bus):
+    asyncio.ensure_future(mock_request_response(request_type, response, bus))
 
 
 async def connect_to_peers_loop(peer_pool, nodes):
@@ -124,10 +143,20 @@ class FakeAsyncMainnetChain(MainnetChain):
 
 class FakeAsyncChain(MiningChain):
     coro_import_block = coro_import_block
+    coro_get_block_header_by_hash = async_passthrough('get_block_header_by_hash')
     coro_get_canonical_head = async_passthrough('get_canonical_head')
     coro_validate_chain = async_passthrough('validate_chain')
     coro_validate_receipt = async_passthrough('validate_receipt')
     chaindb_class = FakeAsyncChainDB
+
+
+class LatestTestChain(FakeAsyncChain):
+    """
+    A test chain that uses the most recent mainnet VM from block 0.
+    That means the VM will explicitly change when a new network upgrade is locked in.
+    """
+    vm_configuration = ((0, PetersburgVM),)
+    network_id = 999
 
 
 class ByzantiumTestChain(FakeAsyncChain):
@@ -155,7 +184,7 @@ def load_mining_chain(db):
 
     return build(
         FakeAsyncChain,
-        byzantium_at(0),
+        latest_mainnet_at(0),
         enable_pow_mining(),
         genesis(db=db, params=GENESIS_PARAMS, state=GENESIS_STATE),
     )
@@ -164,6 +193,11 @@ def load_mining_chain(db):
 class DBFixture(Enum):
     twenty_pow_headers = '20pow_headers.ldb'
     thousand_pow_headers = '1000pow_headers.ldb'
+
+    # this chain updates and churns storage, as well as creating a bunch of
+    # contracts that are later deleted. It was built with:
+    # build_pow_churning_fixture(db, 128)
+    state_churner = 'churn_state.ldb'
 
 
 def load_fixture_db(db_fixture, db_class=LevelDB):
@@ -214,3 +248,21 @@ async def run_request_server(event_bus, chaindb, server_type=None):
         yield request_server
     finally:
         await request_server.cancel()
+
+
+@asynccontextmanager
+async def run_proxy_peer_pool(event_bus, peer_pool_type=None):
+
+    peer_pool_type = ETHProxyPeerPool if peer_pool_type is None else peer_pool_type
+
+    proxy_peer_pool = peer_pool_type(
+        event_bus,
+        TO_NETWORKING_BROADCAST_CONFIG,
+    )
+    asyncio.ensure_future(proxy_peer_pool.run())
+
+    await proxy_peer_pool.events.started.wait()
+    try:
+        yield proxy_peer_pool
+    finally:
+        await proxy_peer_pool.cancel()

@@ -3,14 +3,18 @@ import copy
 import pytest
 
 
-from eth2.beacon.chains.base import (
-    BeaconChain,
-)
 from eth2.beacon.exceptions import (
     BlockClassError,
 )
-from eth2.beacon.state_machines.forks.serenity.blocks import (
-    SerenityBeaconBlock,
+from eth2.beacon.chains.base import (
+    BeaconChain,
+)
+from eth2.beacon.db.exceptions import (
+    AttestationRootNotFound,
+    StateSlotNotFound,
+)
+from eth2.beacon.types.blocks import (
+    BeaconBlock,
 )
 from eth2.beacon.tools.builder.proposer import (
     create_mock_block,
@@ -19,8 +23,8 @@ from eth2.beacon.tools.builder.proposer import (
 from eth2.beacon.tools.builder.validator import (
     create_mock_signed_attestations_at_slot,
 )
-from eth2.beacon.types.blocks import (
-    BeaconBlock,
+from eth2.beacon.state_machines.forks.serenity.blocks import (
+    SerenityBeaconBlock,
 )
 
 
@@ -42,7 +46,7 @@ def valid_chain(beacon_chain_with_block_validation):
         (100, 20, 10, 10),
     ]
 )
-def test_canonical_chain(valid_chain, genesis_slot):
+def test_canonical_chain(valid_chain, genesis_slot, fork_choice_scoring):
     genesis_block = valid_chain.get_canonical_block_by_slot(genesis_slot)
 
     # Our chain fixture is created with only the genesis header, so initially that's the head of
@@ -53,7 +57,7 @@ def test_canonical_chain(valid_chain, genesis_slot):
         slot=genesis_block.slot + 1,
         previous_block_root=genesis_block.signing_root,
     )
-    valid_chain.chaindb.persist_block(block, block.__class__)
+    valid_chain.chaindb.persist_block(block, block.__class__, fork_choice_scoring)
 
     assert valid_chain.get_canonical_head() == block
 
@@ -64,6 +68,52 @@ def test_canonical_chain(valid_chain, genesis_slot):
 
     result_block = valid_chain.get_block_by_root(block.signing_root)
     assert result_block == block
+
+
+@pytest.mark.parametrize(
+    (
+        'num_validators,'
+        'slots_per_epoch,'
+        'target_committee_size,'
+        'shard_count,'
+    ),
+    [
+        (100, 16, 10, 10),
+    ]
+)
+def test_get_state_by_slot(valid_chain,
+                           genesis_block,
+                           genesis_state,
+                           config,
+                           keymap):
+    # Fisrt, skip block and check if `get_state_by_slot` returns the expected state
+    state_machine = valid_chain.get_state_machine(genesis_block.slot)
+    state = state_machine.state
+    block_skipped_slot = genesis_block.slot + 1
+    block_skipped_state = state_machine.state_transition.apply_state_transition_without_block(
+        state,
+        block_skipped_slot,
+    )
+    with pytest.raises(StateSlotNotFound):
+        valid_chain.get_state_by_slot(block_skipped_slot)
+    valid_chain.chaindb.persist_state(block_skipped_state)
+    assert valid_chain.get_state_by_slot(block_skipped_slot).root == block_skipped_state.root
+
+    # Next, import proposed block and check if `get_state_by_slot` returns the expected state
+    proposed_slot = block_skipped_slot + 1
+    block = create_mock_block(
+        state=block_skipped_state,
+        config=config,
+        state_machine=state_machine,
+        block_class=genesis_block.__class__,
+        parent_block=genesis_block,
+        keymap=keymap,
+        slot=proposed_slot,
+        attestations=(),
+    )
+    valid_chain.import_block(block)
+    state = valid_chain.get_state_machine().state
+    assert valid_chain.get_state_by_slot(proposed_slot).root == state.root
 
 
 @pytest.mark.long
@@ -87,7 +137,7 @@ def test_import_blocks(valid_chain,
         block = create_mock_block(
             state=state,
             config=config,
-            state_machine=valid_chain.get_state_machine(blocks[-1]),
+            state_machine=valid_chain.get_state_machine(blocks[-1].slot),
             block_class=genesis_block.__class__,
             parent_block=blocks[-1],
             keymap=keymap,
@@ -97,7 +147,7 @@ def test_import_blocks(valid_chain,
         valid_chain.import_block(block)
         assert valid_chain.get_canonical_head() == block
 
-        state = valid_chain.get_state_machine(block).state
+        state = valid_chain.get_state_by_slot(block.slot)
 
         assert block == valid_chain.get_canonical_block_by_slot(
             block.slot
@@ -113,10 +163,10 @@ def test_import_blocks(valid_chain,
         valid_chain_2.import_block(block)
 
     assert valid_chain.get_canonical_head() == valid_chain_2.get_canonical_head()
-    assert valid_chain.get_state_machine(blocks[-1]).state.slot != 0
+    assert valid_chain.get_state_by_slot(blocks[-1].slot).slot != 0
     assert (
-        valid_chain.get_state_machine(blocks[-1]).state ==
-        valid_chain_2.get_state_machine(blocks[-1]).state
+        valid_chain.get_state_by_slot(blocks[-1].slot) ==
+        valid_chain_2.get_state_by_slot(blocks[-1].slot)
     )
 
 
@@ -165,7 +215,7 @@ def test_get_attestation_root(valid_chain,
                               config,
                               keymap,
                               min_attestation_inclusion_delay):
-    state_machine = valid_chain.get_state_machine(genesis_block)
+    state_machine = valid_chain.get_state_machine()
     attestations = create_mock_signed_attestations_at_slot(
         state=genesis_state,
         config=config,
@@ -188,3 +238,10 @@ def test_get_attestation_root(valid_chain,
     # Only one attestation in attestations, so just check that one
     a0 = attestations[0]
     assert valid_chain.get_attestation_by_root(a0.root) == a0
+    assert valid_chain.attestation_exists(a0.root)
+    fake_attestation = a0.copy(
+        aggregate_signature=b'\x78' * 96,
+    )
+    with pytest.raises(AttestationRootNotFound):
+        valid_chain.get_attestation_by_root(fake_attestation.root)
+    assert not valid_chain.attestation_exists(fake_attestation.root)

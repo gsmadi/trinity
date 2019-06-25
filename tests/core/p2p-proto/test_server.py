@@ -176,13 +176,14 @@ async def test_peer_pool_answers_connect_commands(event_loop, event_bus, server)
 
         assert len(server.peer_pool.connected_nodes) == 0
 
-        await event_bus.wait_until_any_connection_subscribed_to(ConnectToNodeCommand)
+        await event_bus.wait_until_any_endpoint_subscribed_to(ConnectToNodeCommand)
         await event_bus.broadcast(
             ConnectToNodeCommand(RECEIVER_REMOTE),
             TO_NETWORKING_BROADCAST_CONFIG
         )
 
-        await asyncio.sleep(0.1)
+        # This test was maybe 30% flaky at 0.1 sleep
+        await asyncio.sleep(0.2)
 
         assert len(server.peer_pool.connected_nodes) == 1
 

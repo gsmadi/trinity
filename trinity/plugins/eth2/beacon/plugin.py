@@ -23,24 +23,14 @@ from p2p.constants import (
 from trinity._utils.shutdown import (
     exit_with_endpoint_and_services,
 )
-from trinity.config import (
-    BeaconAppConfig,
-)
 from trinity.db.beacon.manager import (
     create_db_consumer_manager,
 )
-from trinity.endpoint import (
-    TrinityEventBusEndpoint,
-)
-from trinity.extensibility import (
-    BaseIsolatedPlugin,
-)
-from trinity.server import (
-    BCCServer,
-)
-from trinity.sync.beacon.chain import (
-    BeaconChainSyncer,
-)
+from trinity.config import BeaconAppConfig
+from trinity.endpoint import TrinityEventBusEndpoint
+from trinity.extensibility import AsyncioIsolatedPlugin
+from trinity.server import BCCServer
+from trinity.sync.beacon.chain import BeaconChainSyncer
 from trinity.sync.common.chain import (
     SyncBlockImporter,
 )
@@ -53,7 +43,7 @@ from .validator import (
 )
 
 
-class BeaconNodePlugin(BaseIsolatedPlugin):
+class BeaconNodePlugin(AsyncioIsolatedPlugin):
 
     @property
     def name(self) -> str:
@@ -63,6 +53,10 @@ class BeaconNodePlugin(BaseIsolatedPlugin):
     def configure_parser(cls, arg_parser: ArgumentParser, subparser: _SubParsersAction) -> None:
         arg_parser.add_argument(
             "--bootstrap_nodes",
+            help="enode://node1@0.0.0.0:1234,enode://node2@0.0.0.0:5678",
+        )
+        arg_parser.add_argument(
+            "--preferred_nodes",
             help="enode://node1@0.0.0.0:1234,enode://node2@0.0.0.0:5678",
         )
         arg_parser.add_argument(
@@ -111,8 +105,7 @@ class BeaconNodePlugin(BaseIsolatedPlugin):
             token=server.cancel_token,
         )
 
-        state_machine = chain.get_state_machine()
-        state = state_machine.state
+        state = chain.get_state_by_slot(chain_config.genesis_config.GENESIS_SLOT)
         registry_pubkeys = [v_record.pubkey for v_record in state.validator_registry]
 
         validator_privkeys = {}
@@ -127,6 +120,7 @@ class BeaconNodePlugin(BaseIsolatedPlugin):
             validator_privkeys=validator_privkeys,
             event_bus=self.event_bus,
             token=server.cancel_token,
+            get_ready_attestations_fn=server.receive_server.get_ready_attestations,
         )
 
         slot_ticker = SlotTicker(

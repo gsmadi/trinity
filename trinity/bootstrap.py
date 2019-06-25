@@ -108,7 +108,7 @@ def main_entry(trinity_boot: BootFn,
                plugins: Iterable[Type[BasePlugin]],
                sub_configs: Iterable[Type[BaseAppConfig]]) -> None:
 
-    main_endpoint = TrinityMainEventBusEndpoint()
+    main_endpoint = TrinityMainEventBusEndpoint(name=MAIN_EVENTBUS_ENDPOINT)
 
     plugin_manager = PluginManager(
         MainAndIsolatedProcessScope(main_endpoint),
@@ -125,25 +125,36 @@ def main_entry(trinity_boot: BootFn,
             "directory with `--data-dir path/to/data/directory`"
         )
 
-    has_ambigous_logging_config = (
-        args.log_levels is not None and
-        None in args.log_levels and
+    # The `common_log_level` is derived from `--log-level <Level>` / `-l <Level>` without
+    # specifying any module. If present, it is used for both `stderr` and `file` logging.
+    common_log_level = args.log_levels and args.log_levels.get(None)
+    has_ambigous_logging_config = ((
+        common_log_level is not None and
         args.stderr_log_level is not None
-    )
+    ) or (
+        common_log_level is not None and
+        args.file_log_level is not None
+    ))
+
     if has_ambigous_logging_config:
         parser.error(
-            "\n"
-            "Ambiguous logging configuration: The logging level for stderr was "
-            "configured with both `--stderr-log-level` and `--log-level`. "
-            "Please remove one of these flags",
+            f"""\n
+            Ambiguous logging configuration: The `--log-level (-l)` flag sets the
+            log level for both file and stderr logging.
+            To configure different log level for file and stderr logging,
+            remove the `--log-level` flag and use `--stderr-log-level` and/or
+            `--file-log-level` separately.
+            Alternatively, remove the `--stderr-log-level` and/or `--file-log-level`
+            flags to share one single log level across both handlers.
+            """
         )
 
     if is_prerelease():
         # this modifies the asyncio logger, but will be overridden by any custom settings below
         enable_warnings_by_default()
 
-    stderr_logger, formatter, handler_stream = setup_trinity_stderr_logging(
-        args.stderr_log_level or (args.log_levels and args.log_levels.get(None))
+    stderr_logger, handler_stream = setup_trinity_stderr_logging(
+        args.stderr_log_level or common_log_level
     )
 
     if args.log_levels:
@@ -173,10 +184,9 @@ def main_entry(trinity_boot: BootFn,
 
     file_logger, log_queue, listener = setup_trinity_file_and_queue_logging(
         stderr_logger,
-        formatter,
         handler_stream,
         trinity_config.logfile_path,
-        args.file_log_level,
+        args.file_log_level or common_log_level,
     )
 
     display_launch_logs(trinity_config)
@@ -245,12 +255,10 @@ async def trinity_boot_coro(kill_trinity, main_endpoint, trinity_config,  # type
         MAIN_EVENTBUS_ENDPOINT,
         trinity_config.ipc_dir
     )
-    await main_endpoint.start_serving(main_connection_config)
-    main_endpoint.track_and_propagate_available_endpoints()
+    await main_endpoint.start()
+    await main_endpoint.start_server(main_connection_config.path)
 
-    # We listen on events such as `ShutdownRequested` which may or may not originate on
-    # the `main_endpoint` which is why we connect to our own endpoint here
-    await main_endpoint.connect_to_endpoints(main_connection_config)
+    main_endpoint.track_and_propagate_available_endpoints()
 
     main_endpoint.subscribe(
         ShutdownRequest,
