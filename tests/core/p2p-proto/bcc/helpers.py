@@ -39,7 +39,7 @@ from p2p.tools.paragon.helpers import (
 from eth2.beacon.constants import (
     EMPTY_SIGNATURE,
 )
-from eth2.beacon.fork_choice import higher_slot_scoring
+from eth2.beacon.fork_choice.higher_slot import higher_slot_scoring
 from eth2.beacon.state_machines.forks.serenity import SERENITY_CONFIG
 from eth2.configs import (
     Eth2GenesisConfig,
@@ -72,14 +72,14 @@ class FakeAsyncBeaconChainDB(BaseAsyncBeaconChainDB, BeaconChainDB):
 def create_test_block(parent=None, genesis_config=SERENITY_GENESIS_CONFIG, **kwargs):
     defaults = {
         "slot": genesis_config.GENESIS_SLOT,
-        "previous_block_root": ZERO_HASH32,
+        "parent_root": ZERO_HASH32,
         "state_root": ZERO_HASH32,  # note: not the actual genesis state root
         "signature": EMPTY_SIGNATURE,
-        "body": BeaconBlockBody.create_empty_body()
+        "body": BeaconBlockBody(),
     }
 
     if parent is not None:
-        kwargs["previous_block_root"] = parent.signing_root
+        kwargs["parent_root"] = parent.signing_root
         kwargs["slot"] = parent.slot + 1
 
     return BeaconBlock(**merge(defaults, kwargs))
@@ -110,9 +110,7 @@ async def get_chain_db(blocks=(),
     await chain_db.coro_persist_block_chain(
         blocks,
         BeaconBlock,
-        (
-            higher_slot_scoring for block in blocks
-        ),
+        (higher_slot_scoring,) * len(blocks),
     )
     return chain_db
 

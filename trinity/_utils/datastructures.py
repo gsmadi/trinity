@@ -6,7 +6,6 @@ from asyncio import (
     Queue,
     QueueFull,
 )
-from collections import defaultdict
 from enum import Enum
 from functools import (
     total_ordering,
@@ -360,7 +359,10 @@ class BaseOrderedTaskPreparation(ABC, Generic[TTask, TTaskID]):
         pass
 
     @abstractmethod
-    def register_tasks(self, tasks: Tuple[TTask, ...], ignore_duplicates: bool = False) -> None:
+    def register_tasks(
+            self,
+            tasks: Tuple[TTask, ...],
+            ignore_duplicates: bool = False) -> Iterable[TTask]:
         pass
 
     @abstractmethod
@@ -493,11 +495,6 @@ class OrderedTaskPreparation(
         # all of the tasks that have been completed, and not pruned
         self._tasks: Dict[TTaskID, BaseTaskPrerequisites[TTask, TPrerequisite]] = {}
 
-        # In self._dependencies, when the key becomes ready, the task ids in the
-        # value set *might* also become ready
-        # (they only become ready if their prerequisites are complete)
-        self._dependencies: Dict[TTaskID, Set[TTaskID]] = defaultdict(set)
-
         # task ids are in this set if either:
         # - one of their prerequisites is incomplete OR
         # - their dependent task is not ready
@@ -539,13 +536,14 @@ class OrderedTaskPreparation(
 
         dependency_id = self._dependency_of(finished_task)
         self._roots.add(task_id, dependency_id)
-        if dependency_id in self._tasks:
-            # set a finished dependency that has a parent already entered. Mark this as a dependency
-            self._dependencies[dependency_id].add(task_id)
 
         # note that this task is intentionally *not* added to self._unready
 
-    def register_tasks(self, tasks: Tuple[TTask, ...], ignore_duplicates: bool = False) -> None:
+    @to_tuple
+    def register_tasks(
+            self,
+            tasks: Tuple[TTask, ...],
+            ignore_duplicates: bool = False) -> Iterable[TTask]:
         """
         Initiate a task into tracking. By default, each task must be registered
         *after* its dependency has been registered.
@@ -556,9 +554,20 @@ class OrderedTaskPreparation(
         :param tasks: the tasks to register, in iteration order
         :param ignore_duplicates: any tasks that have already been registered will be ignored,
             whether ready or not
+        :return: which of the tasks were registered (only relevant when ignore_duplicates=True)
         """
-        identified_tasks = tuple((self._id_of(task), task) for task in tasks)
-        duplicates = tuple(task for task_id, task in identified_tasks if task_id in self._tasks)
+        identified_tasks = dict((self._id_of(task), task) for task in tasks)
+
+        # check if there are duplicate tasks within `tasks`
+        if len(identified_tasks) < len(tasks) and not ignore_duplicates:
+            raise ValidationError(
+                f"Not allowed to register same task twice. Tried to register: {tasks}"
+            )
+
+        duplicates = tuple(
+            task for task_id, task in identified_tasks.items()
+            if task_id in self._tasks
+        )
 
         if duplicates and not ignore_duplicates:
             raise DuplicateTasks(
@@ -568,7 +577,7 @@ class OrderedTaskPreparation(
 
         task_meta_info = tuple(
             (self._prereq_tracker(task), task_id, self._dependency_of(task))
-            for task_id, task in identified_tasks
+            for task_id, task in identified_tasks.items()
             # when ignoring duplicates, must not try to re-add them
             if task_id not in self._tasks
         )
@@ -584,12 +593,13 @@ class OrderedTaskPreparation(
             else:
                 self._tasks[task_id] = prereq_tracker
                 self._unready.add(task_id)
-                self._dependencies[dependency_id].add(task_id)
                 self._roots.add(task_id, dependency_id)
 
                 if prereq_tracker.is_complete and self._is_ready(prereq_tracker.task):
                     # this is possible for tasks with 0 prerequisites (useful for pure ordering)
                     self._mark_complete(task_id)
+
+                yield prereq_tracker.task
 
     def finish_prereq(self, prereq: TPrerequisite, tasks: Tuple[TTask, ...]) -> None:
         """For every task in tasks, mark the given prerequisite as completed"""
@@ -663,9 +673,11 @@ class OrderedTaskPreparation(
         self._unready.remove(task_id)
 
         # resolve tasks that depend on this task
-        for depending_task_id in self._dependencies[task_id]:
-            # we already know that this task is ready, so we only need to check completion
-            if self._tasks[depending_task_id].is_complete:
+        for depending_task_id in self._roots.get_children(task_id):
+            # We already know that the depending task is ready, so we only need to check:
+            # 1. Are all the prerequesites of the depending task complete?
+            # 2. Was the depending task previously incomplete?
+            if self._tasks[depending_task_id].is_complete and depending_task_id in self._unready:
                 yield depending_task_id
 
     def _prune_finished(self, task_id: TTaskID) -> None:
@@ -690,6 +702,10 @@ class OrderedTaskPreparation(
             # ^ when this is called, pruning is triggered from
             # the tip of task 1 (whether or not task 2 is ready)
         """
+        # It is possible for this finished task to already be pruned, in which case, skip it
+        if task_id not in self._tasks:
+            return
+
         root_task_id, depth = self._roots.get_root(task_id)
         num_to_prune = depth - self._max_depth
         if num_to_prune <= 0:
@@ -700,7 +716,6 @@ class OrderedTaskPreparation(
     def _prune(self, prune_task_id: TTaskID) -> None:
         # _roots.prune() has validation in it, so if there is a problem, we should skip the rest
         self._roots.prune(prune_task_id)
-        del self._dependencies[prune_task_id]
         del self._tasks[prune_task_id]
         if prune_task_id in self._declared_finished:
             self._declared_finished.remove(prune_task_id)

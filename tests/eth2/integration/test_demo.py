@@ -1,10 +1,11 @@
 import pytest
 
 from eth2.beacon.db.chain import BeaconChainDB
-from eth2.beacon.fork_choice import higher_slot_scoring
+from eth2.beacon.fork_choice.higher_slot import higher_slot_scoring
 from eth2.beacon.helpers import (
     slot_to_epoch,
 )
+from eth2.beacon.operations.attestation_pool import AttestationPool
 from eth2.beacon.state_machines.forks.serenity.blocks import (
     SerenityBeaconBlock,
 )
@@ -22,6 +23,9 @@ from eth2.beacon.tools.builder.proposer import (
 )
 from eth2.beacon.tools.builder.validator import (
     create_mock_signed_attestations_at_slot,
+)
+from eth2.beacon.tools.misc.ssz_vector import (
+    override_vector_lengths,
 )
 
 
@@ -50,8 +54,18 @@ def fork_choice_scoring():
     return higher_slot_scoring
 
 
+@pytest.mark.parametrize(
+    (
+        "validator_count"
+    ),
+    (
+        (40),
+    )
+)
 def test_demo(base_db,
+              validator_count,
               keymap,
+              pubkeys,
               fork_choice_scoring):
     slots_per_epoch = 8
     config = SERENITY_CONFIG._replace(
@@ -61,25 +75,29 @@ def test_demo(base_db,
         SHARD_COUNT=2,
         MIN_ATTESTATION_INCLUSION_DELAY=2,
     )
+    override_vector_lengths(config)
     fixture_sm_class = SerenityStateMachine.configure(
         __name__='SerenityStateMachineForTesting',
         config=config,
     )
 
-    num_validators = 40
-
     genesis_slot = config.GENESIS_SLOT
     genesis_epoch = config.GENESIS_EPOCH
     chaindb = BeaconChainDB(base_db, config)
+    attestation_pool = AttestationPool()
+
+    # TODO(ralexstokes) clean up how the cache is populated
+    for i in range(validator_count):
+        pubkeys[i]
 
     genesis_state, genesis_block = create_mock_genesis(
-        num_validators=num_validators,
+        num_validators=validator_count,
         config=config,
         keymap=keymap,
         genesis_block_class=SerenityBeaconBlock,
     )
-    for i in range(num_validators):
-        assert genesis_state.validator_registry[i].is_active(genesis_slot)
+    for i in range(validator_count):
+        assert genesis_state.validators[i].is_active(genesis_slot)
 
     chaindb.persist_block(genesis_block, SerenityBeaconBlock, fork_choice_scoring)
     chaindb.persist_state(genesis_state)
@@ -103,6 +121,7 @@ def test_demo(base_db,
             config=config,
             state_machine=fixture_sm_class(
                 chaindb,
+                attestation_pool,
                 blocks[-1].slot,
             ),
             block_class=SerenityBeaconBlock,
@@ -115,6 +134,7 @@ def test_demo(base_db,
         # Get state machine instance
         sm = fixture_sm_class(
             chaindb,
+            attestation_pool,
             blocks[-1].slot,
         )
         state, _ = sm.import_block(block)
@@ -131,6 +151,7 @@ def test_demo(base_db,
             config=config,
             state_machine=fixture_sm_class(
                 chaindb,
+                attestation_pool,
                 block.slot,
             ),
             attestation_slot=attestation_slot,
@@ -143,5 +164,5 @@ def test_demo(base_db,
     assert state.slot == chain_length + genesis_slot
 
     # Justification assertions
-    assert state.current_justified_epoch == 2 + genesis_epoch
-    assert state.finalized_epoch == 1 + genesis_epoch
+    assert state.current_justified_epoch == genesis_epoch
+    assert state.finalized_epoch == genesis_epoch

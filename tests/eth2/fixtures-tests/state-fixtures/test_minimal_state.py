@@ -19,6 +19,7 @@ from eth2.configs import (
     Eth2GenesisConfig,
 )
 from eth2.beacon.db.chain import BeaconChainDB
+from eth2.beacon.operations.attestation_pool import AttestationPool
 from eth2.beacon.tools.misc.ssz_vector import (
     override_vector_lengths,
 )
@@ -115,7 +116,6 @@ def test_state(base_db, test_case):
 
 
 def generate_config_by_dict(dict_config):
-    dict_config['DEPOSIT_CONTRACT_ADDRESS'] = b'\x00' * 20
     for key in list(dict_config):
         if 'DOMAIN_' in key:
             # DOMAIN is defined in SignatureDomain
@@ -153,10 +153,11 @@ def execute_state_transtion(test_case, base_db):
         config=config,
     )
     chaindb = BeaconChainDB(base_db, Eth2GenesisConfig(config))
+    attestation_pool = AttestationPool()
 
     post_state = pre_state.copy()
     for block in blocks:
-        sm = sm_class(chaindb, None, post_state)
+        sm = sm_class(chaindb, attestation_pool, None, post_state)
         post_state, _ = sm.import_block(block)
 
     # Use dict diff, easier to see the diff

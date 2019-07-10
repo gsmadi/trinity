@@ -16,7 +16,11 @@ from trinity._utils.log_messages import (
     create_missing_ipc_error_message,
 )
 from trinity.config import (
+    Eth1AppConfig,
     TrinityConfig,
+)
+from trinity.db.eth1.manager import (
+    create_db_consumer_manager,
 )
 
 
@@ -96,16 +100,25 @@ def console(ipc_path: Path,
 
 def db_shell(use_ipython: bool, database_dir: Path, trinity_config: TrinityConfig) -> None:
 
-    db = LevelDB(database_dir)
+    db_ipc_path = trinity_config.database_ipc_path
+    trinity_already_running = db_ipc_path.exists()
+    if trinity_already_running:
+        db_manager = create_db_consumer_manager(db_ipc_path)
+        db = db_manager.get_db()  # type: ignore
+    else:
+        db = LevelDB(database_dir)
+
     chaindb = ChainDB(db)
     head = chaindb.get_canonical_head()
-    chain_config = trinity_config.get_chain_config()
+    app_config = trinity_config.get_app_config(Eth1AppConfig)
+    chain_config = app_config.get_chain_config()
     chain = chain_config.full_chain_class(db)
 
     greeter = f"""
     Head: #{head.block_number}
     Hash: {head.hex_hash}
     State Root: {encode_hex(head.state_root)}
+    Inspecting active Trinity? {trinity_already_running}
 
     Available Context Variables:
       - `db`: base database object
