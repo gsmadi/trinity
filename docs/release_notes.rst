@@ -1,5 +1,10 @@
-Trinity 
-=======
+Release Notes 
+=============
+
+Trinity is moving fast. Read up on all the latest improvements.
+
+.. towncrier release notes start
+
 
 v0.1.0-alpha.25
 --------------------------

@@ -38,7 +38,8 @@ deps = {
         "jsonschema==3.0.1",
         "mypy_extensions>=0.4.1,<1.0.0",
         "typing_extensions>=3.7.2,<4.0.0",
-        "ruamel.yaml>=0.15.87",
+        "ruamel.yaml==0.15.98",
+        "argcomplete>=1.10.0,<2",
     ],
     'test': [
         "hypothesis>=4.24.3,<5",
@@ -55,7 +56,7 @@ deps = {
         # only needed for p2p
         "pytest-asyncio-network-simulator==0.1.0a2;python_version>='3.6'",
         # only for eth2
-        "ruamel.yaml>=0.15.87,<0.16",
+        "ruamel.yaml==0.15.98",
     ],
     'lint': [
         "flake8==3.5.0",
@@ -69,6 +70,7 @@ deps = {
         "Sphinx>=1.5.5,<1.8.0",
         "sphinx_rtd_theme>=0.1.9",
         "sphinxcontrib-asyncio>=0.2.0",
+        "towncrier>=19.2.0, <20",
     ],
     'dev': [
         "bumpversion>=0.5.3,<1",
@@ -93,7 +95,7 @@ deps = {
         "py-ecc==1.6.0",
         "rlp>=1.1.0,<2.0.0",
         PYEVM_DEPENDENCY,
-        "ssz==0.1.0a8",
+        "ssz==0.1.0a10",
     ],
     'libp2p': [
         "base58>=1.0.3",

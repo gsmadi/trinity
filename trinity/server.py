@@ -1,9 +1,7 @@
 from abc import abstractmethod
 import asyncio
 import logging
-import secrets
 from typing import (
-    Any,
     cast,
     Generic,
     Sequence,
@@ -13,33 +11,23 @@ from typing import (
 )
 
 from eth_keys import datatypes
-from eth_utils import big_endian_to_int
 from cancel_token import CancelToken, OperationCancelled
 from eth_typing import BlockNumber
 from eth.vm.base import BaseVM
-from p2p.auth import (
-    decode_authentication,
-    HandshakeResponder,
-)
+
 from p2p.constants import (
-    ENCRYPTED_AUTH_MSG_LEN,
     DEFAULT_MAX_PEERS,
-    HASH_LEN,
-    REPLY_TIMEOUT,
 )
 from p2p.exceptions import (
-    DecryptionError,
     HandshakeFailure,
     PeerConnectionLost,
 )
 from p2p.kademlia import (
-    Address,
     Node,
 )
 from p2p.p2p_proto import (
     DisconnectReason,
 )
-from p2p.peer import BasePeer
 from p2p.service import BaseService
 from p2p.transport import Transport
 
@@ -54,14 +42,10 @@ from trinity.db.beacon.chain import BaseAsyncBeaconChainDB
 from trinity.endpoint import TrinityEventBusEndpoint
 from trinity.protocol.common.context import ChainContext
 from trinity.protocol.common.peer import BasePeerPool
-from trinity.protocol.common.peer_pool_event_bus import (
-    DefaultPeerPoolEventServer,
-    PeerPoolEventServer,
-)
-from trinity.protocol.eth.peer import ETHPeerPool, ETHPeerPoolEventServer
-from trinity.protocol.les.peer import LESPeerPool, LESPeerPoolEventServer
+from trinity.protocol.eth.peer import ETHPeerPool
+from trinity.protocol.les.peer import LESPeerPool
 from trinity.protocol.bcc.context import BeaconContext
-from trinity.protocol.bcc.peer import BCCPeerPool, BCCPeerPoolEventServer
+from trinity.protocol.bcc.peer import BCCPeerPool
 from trinity.protocol.bcc.servers import (
     BCCReceiveServer,
 )
@@ -77,7 +61,6 @@ class BaseServer(BaseService, Generic[TPeerPool]):
     """Server listening for incoming connections"""
     _tcp_listener = None
     peer_pool: TPeerPool
-    event_server_class: Type[PeerPoolEventServer[Any]] = DefaultPeerPoolEventServer
 
     def __init__(self,
                  privkey: datatypes.PrivateKey,
@@ -115,7 +98,6 @@ class BaseServer(BaseService, Generic[TPeerPool]):
 
         # child services
         self.peer_pool = self._make_peer_pool()
-        self.event_server = self.event_server_class(event_bus, self.peer_pool, self.cancel_token)
 
         if not bootstrap_nodes:
             self.logger.warning("Running with no bootstrap nodes")
@@ -150,7 +132,6 @@ class BaseServer(BaseService, Generic[TPeerPool]):
         self.logger.info('peers: max_peers=%s', self.max_peers)
 
         self.run_daemon(self.peer_pool)
-        self.run_daemon(self.event_server)
 
         await self.cancel_token.wait()
 
@@ -167,7 +148,7 @@ class BaseServer(BaseService, Generic[TPeerPool]):
             asyncio.IncompleteReadError,
         )
 
-        def cleanup_reader_and_writer() -> None:
+        def _cleanup_reader_and_writer() -> None:
             if not reader.at_eof():
                 reader.feed_eof()
             writer.close()
@@ -176,90 +157,24 @@ class BaseServer(BaseService, Generic[TPeerPool]):
             await self._receive_handshake(reader, writer)
         except expected_exceptions as e:
             self.logger.debug("Could not complete handshake: %s", e)
-            cleanup_reader_and_writer()
+            _cleanup_reader_and_writer()
         except OperationCancelled:
             pass
         except Exception as e:
             self.logger.exception("Unexpected error handling handshake")
-            cleanup_reader_and_writer()
+            _cleanup_reader_and_writer()
 
     async def _receive_handshake(
             self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        msg = await self.wait(
-            reader.read(ENCRYPTED_AUTH_MSG_LEN),
-            timeout=REPLY_TIMEOUT)
-
-        peername = writer.get_extra_info("peername")
-        if peername is None:
-            socket = writer.get_extra_info("socket")
-            sockname = writer.get_extra_info("sockname")
-            raise HandshakeFailure(
-                "Received incoming connection with no remote information:"
-                f"socket={repr(socket)}  sockname={sockname}"
-            )
-
-        ip, socket, *_ = peername
-        remote_address = Address(ip, socket)
-        self.logger.debug("Receiving handshake from %s", remote_address)
-
-        try:
-            ephem_pubkey, initiator_nonce, initiator_pubkey = decode_authentication(
-                msg, self.privkey)
-        except DecryptionError as non_eip8_err:
-            # Try to decode as EIP8
-            got_eip8 = True
-            msg_size = big_endian_to_int(msg[:2])
-            remaining_bytes = msg_size - ENCRYPTED_AUTH_MSG_LEN + 2
-            msg += await self.wait(
-                reader.read(remaining_bytes),
-                timeout=REPLY_TIMEOUT)
-            try:
-                ephem_pubkey, initiator_nonce, initiator_pubkey = decode_authentication(
-                    msg, self.privkey)
-            except DecryptionError as eip8_err:
-                raise HandshakeFailure(
-                    f"Failed to decrypt both EIP8 handshake: {eip8_err}  and "
-                    f"non-EIP8 handshake: {non_eip8_err}"
-                )
-        else:
-            got_eip8 = False
-
-        initiator_remote = Node(initiator_pubkey, remote_address)
-        responder = HandshakeResponder(initiator_remote, self.privkey, got_eip8, self.cancel_token)
-
-        responder_nonce = secrets.token_bytes(HASH_LEN)
-        auth_ack_msg = responder.create_auth_ack_message(responder_nonce)
-        auth_ack_ciphertext = responder.encrypt_auth_ack_message(auth_ack_msg)
-
-        # Use the `writer` to send the reply to the remote
-        writer.write(auth_ack_ciphertext)
-        await self.wait(writer.drain())
-
-        # Call `HandshakeResponder.derive_shared_secrets()` and use return values to create `Peer`
-        aes_secret, mac_secret, egress_mac, ingress_mac = responder.derive_secrets(
-            initiator_nonce=initiator_nonce,
-            responder_nonce=responder_nonce,
-            remote_ephemeral_pubkey=ephem_pubkey,
-            auth_init_ciphertext=msg,
-            auth_ack_ciphertext=auth_ack_ciphertext
-        )
-
-        transport = Transport(
-            remote=initiator_remote,
-            private_key=self.privkey,
+        transport = await Transport.receive_connection(
             reader=reader,
             writer=writer,
-            aes_secret=aes_secret,
-            mac_secret=mac_secret,
-            egress_mac=egress_mac,
-            ingress_mac=ingress_mac,
+            private_key=self.privkey,
+            token=self.cancel_token,
         )
 
-        # Create and register peer in peer_pool
-        peer = self.peer_pool.get_peer_factory().create_peer(
-            transport=transport,
-            inbound=True,
-        )
+        factory = self.peer_pool.get_peer_factory()
+        peer = factory.create_peer(transport, inbound=True)
 
         if self.peer_pool.is_full:
             await peer.disconnect(DisconnectReason.too_many_peers)
@@ -269,29 +184,23 @@ class BaseServer(BaseService, Generic[TPeerPool]):
             return
 
         total_peers = len(self.peer_pool)
-        inbound_peer_count = len([
+        inbound_peer_count = len(tuple(
             peer
             for peer
             in self.peer_pool.connected_nodes.values()
             if peer.inbound
-        ])
+        ))
         if total_peers > 1 and inbound_peer_count / total_peers > DIAL_IN_OUT_RATIO:
             # make sure to have at least 1/4 outbound connections
             await peer.disconnect(DisconnectReason.too_many_peers)
-        else:
-            # We use self.wait() here as a workaround for
-            # https://github.com/ethereum/py-evm/issues/670.
-            await self.wait(self.do_handshake(peer))
+            return
 
-    async def do_handshake(self, peer: BasePeer) -> None:
         await peer.do_p2p_handshake()
         await peer.do_sub_proto_handshake()
         await self.peer_pool.start_peer(peer)
 
 
 class FullServer(BaseServer[ETHPeerPool]):
-
-    event_server_class = ETHPeerPoolEventServer
 
     def _make_peer_pool(self) -> ETHPeerPool:
         context = ChainContext(
@@ -310,8 +219,6 @@ class FullServer(BaseServer[ETHPeerPool]):
 
 class LightServer(BaseServer[LESPeerPool]):
 
-    event_server_class = LESPeerPoolEventServer
-
     def _make_peer_pool(self) -> LESPeerPool:
         context = ChainContext(
             headerdb=self.headerdb,
@@ -328,8 +235,6 @@ class LightServer(BaseServer[LESPeerPool]):
 
 
 class BCCServer(BaseServer[BCCPeerPool]):
-
-    event_server_class = BCCPeerPoolEventServer
 
     def __init__(self,
                  privkey: datatypes.PrivateKey,
@@ -374,7 +279,6 @@ class BCCServer(BaseServer[BCCPeerPool]):
         self.logger.info('peers: max_peers=%s', self.max_peers)
 
         self.run_daemon(self.peer_pool)
-        self.run_daemon(self.event_server)
         self.run_daemon(self.receive_server)
 
         await self.cancel_token.wait()

@@ -3,9 +3,9 @@ from pathlib import Path
 from multiprocessing.managers import (
     BaseManager,
 )
-
-from lahja import (
-    BroadcastConfig,
+from typing import (
+    Generic,
+    TypeVar,
 )
 
 from eth.chains.base import BaseChain
@@ -14,6 +14,7 @@ from p2p.peer_pool import BasePeerPool
 from p2p.service import (
     BaseService,
 )
+from p2p._utils import ensure_global_asyncio_executor
 
 from trinity.chains.full import FullChain
 from trinity.db.eth1.header import (
@@ -30,8 +31,9 @@ from trinity.config import (
 from trinity.endpoint import (
     TrinityEventBusEndpoint,
 )
-from trinity.extensibility.events import (
-    ResourceAvailableEvent
+from trinity.protocol.common.peer import BasePeer
+from trinity.protocol.common.peer_pool_event_bus import (
+    PeerPoolEventServer,
 )
 
 from .events import (
@@ -39,13 +41,16 @@ from .events import (
     NetworkIdResponse,
 )
 
+TPeer = TypeVar('TPeer', bound=BasePeer)
 
-class Node(BaseService):
+
+class Node(BaseService, Generic[TPeer]):
     """
     Create usable nodes by adding subclasses that define the following
     unset attributes.
     """
     _full_chain: FullChain = None
+    _event_server: PeerPoolEventServer[TPeer] = None
 
     def __init__(self, event_bus: TrinityEventBusEndpoint, trinity_config: TrinityConfig) -> None:
         super().__init__()
@@ -93,6 +98,13 @@ class Node(BaseService):
         return self._full_chain
 
     @abstractmethod
+    def get_event_server(self) -> PeerPoolEventServer[TPeer]:
+        """
+        Return the ``PeerPoolEventServer`` of the node
+        """
+        raise NotImplementedError("Node classes must implement this method")
+
+    @abstractmethod
     def get_peer_pool(self) -> BasePeerPool:
         """
         Return the PeerPool instance of the node
@@ -115,46 +127,15 @@ class Node(BaseService):
     def headerdb(self) -> BaseAsyncHeaderDB:
         return self._headerdb
 
-    async def notify_resource_available(self) -> None:
-
-        # We currently need this to give plugins the chance to start as soon
-        # as the `PeerPool` is available. In the long term, the peer pool may become
-        # a plugin itself and we can get rid of this.
-        peer_pool = self.get_peer_pool()
-
-        await self.event_bus.broadcast(
-            ResourceAvailableEvent(
-                resource=(peer_pool, self.cancel_token),
-                resource_type=type(peer_pool)
-            ),
-            BroadcastConfig(internal=True),
-        )
-
-        # This broadcasts the *local* chain, which is suited for tasks that aren't blocking
-        # for too long. There may be value in also broadcasting the proxied chain.
-        await self.event_bus.broadcast(
-            ResourceAvailableEvent(
-                resource=self.get_chain(),
-                resource_type=BaseChain
-            ),
-            BroadcastConfig(internal=True),
-        )
-
-        # Broadcasting the DbManager internally, ensures plugins that run in the networking process
-        # can reuse the existing connection instead of creating additional new connections
-        await self.event_bus.broadcast(
-            ResourceAvailableEvent(
-                resource=self.db_manager,
-                resource_type=BaseManager
-            ),
-            BroadcastConfig(internal=True),
-        )
-
     async def _run(self) -> None:
-        await self.notify_resource_available()
+        # The `networking` process creates a process pool executor to offload cpu intensive
+        # tasks. We should revisit that when we move the sync in its own process
+        ensure_global_asyncio_executor()
         self.run_daemon_task(self.handle_network_id_requests())
         self.run_daemon(self.get_p2p_server())
+        self.run_daemon(self.get_event_server())
         await self.cancellation()
 
     async def _cleanup(self) -> None:
         self.event_bus.request_shutdown("Node finished unexpectedly")
+        ensure_global_asyncio_executor().shutdown(wait=True)
