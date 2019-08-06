@@ -1,29 +1,19 @@
-from abc import ABC
 import logging
 import operator
 import struct
 from typing import (
-    Any,
     ClassVar,
-    Dict,
-    Generic,
     Iterable,
-    List,
     Sequence,
     Tuple,
     Type,
-    TypeVar,
     Union,
-)
-
-from mypy_extensions import (
-    TypedDict,
 )
 
 import snappy
 
 from eth_utils import to_tuple
-from eth_utils.toolz import groupby
+from eth_utils.toolz import accumulate, groupby
 
 import rlp
 from rlp import sedes
@@ -31,39 +21,16 @@ from rlp import sedes
 from eth.constants import NULL_BYTE
 
 from p2p._utils import get_devp2p_cmd_id
-from p2p.exceptions import (
-    MalformedMessage,
-)
-from p2p.transport import Transport
+from p2p.abc import CommandAPI, ProtocolAPI, RequestAPI, TransportAPI
+from p2p.constants import P2P_PROTOCOL_COMMAND_LENGTH
+from p2p.exceptions import MalformedMessage
+from p2p.typing import Capability, Capabilities, Payload, Structure
 
 
-class TypedDictPayload(TypedDict):
-    pass
-
-
-PayloadType = Union[
-    Dict[str, Any],
-    List[rlp.Serializable],
-    Tuple[rlp.Serializable, ...],
-    TypedDictPayload,
-]
-
-# A payload to be delivered with a request
-TRequestPayload = TypeVar('TRequestPayload', bound=PayloadType, covariant=True)
-
-# for backwards compatibility for internal references in p2p:
-_DecodedMsgType = PayloadType
-
-
-StructureType = Union[
-    Tuple[Tuple[str, Any], ...],
-]
-
-
-class Command:
+class Command(CommandAPI):
     _cmd_id: int = None
     decode_strict = True
-    structure: StructureType
+    structure: Structure
 
     _logger: logging.Logger = None
 
@@ -85,7 +52,7 @@ class Command:
     def __str__(self) -> str:
         return f"{type(self).__name__} (cmd_id={self.cmd_id})"
 
-    def encode_payload(self, data: Union[PayloadType, sedes.CountableList]) -> bytes:
+    def encode_payload(self, data: Union[Payload, sedes.CountableList]) -> bytes:
         if isinstance(data, dict):
             if not isinstance(self.structure, tuple):
                 raise ValueError(
@@ -106,7 +73,7 @@ class Command:
             encoder = sedes.List([type_ for _, type_ in self.structure])
         return rlp.encode(data, sedes=encoder)
 
-    def decode_payload(self, rlp_data: bytes) -> PayloadType:
+    def decode_payload(self, rlp_data: bytes) -> Payload:
         if isinstance(self.structure, sedes.CountableList):
             decoder = self.structure
         else:
@@ -125,7 +92,7 @@ class Command:
             in zip(self.structure, data)
         }
 
-    def decode(self, data: bytes) -> PayloadType:
+    def decode(self, data: bytes) -> Payload:
         packet_type = get_devp2p_cmd_id(data)
         if packet_type != self.cmd_id:
             raise MalformedMessage(f"Wrong packet type: {packet_type}, expected {self.cmd_id}")
@@ -154,7 +121,7 @@ class Command:
         else:
             return raw_payload
 
-    def encode(self, data: PayloadType) -> Tuple[bytes, bytes]:
+    def encode(self, data: Payload) -> Tuple[bytes, bytes]:
         encoded_payload = self.encode_payload(data)
         compressed_payload = self.compress_payload(encoded_payload)
 
@@ -176,39 +143,24 @@ class Command:
         return header, body
 
 
-class BaseRequest(ABC, Generic[TRequestPayload]):
-    """
-    Must define command_payload during init. This is the data that will
-    be sent to the peer with the request command.
-    """
-    # Defined at init time, with specific parameters:
-    command_payload: TRequestPayload
-
-    # Defined as class attributes in subclasses
-    # outbound command type
-    cmd_type: Type[Command]
-    # response command type
-    response_type: Type[Command]
-
-
-CapabilityType = Tuple[str, int]
-
-
-class Protocol(ABC):
-    transport: Transport
+class Protocol(ProtocolAPI):
+    transport: TransportAPI
     name: ClassVar[str]
     version: ClassVar[int]
     cmd_length: int = None
     # Command classes that this protocol supports.
-    _commands: Tuple[Type[Command], ...]
+    _commands: Tuple[Type[CommandAPI], ...]
 
     _logger: logging.Logger = None
 
-    def __init__(self, transport: Transport, cmd_id_offset: int, snappy_support: bool) -> None:
+    def __init__(self, transport: TransportAPI, cmd_id_offset: int, snappy_support: bool) -> None:
         self.transport = transport
         self.cmd_id_offset = cmd_id_offset
         self.snappy_support = snappy_support
-        self.commands = [cmd_class(cmd_id_offset, snappy_support) for cmd_class in self._commands]
+        self.commands = tuple(
+            cmd_class(cmd_id_offset, snappy_support)
+            for cmd_class in self._commands
+        )
         self.cmd_by_type = {type(cmd): cmd for cmd in self.commands}
         self.cmd_by_id = {cmd.cmd_id: cmd for cmd in self.commands}
 
@@ -218,28 +170,26 @@ class Protocol(ABC):
             self._logger = logging.getLogger(f"p2p.protocol.{type(self).__name__}")
         return self._logger
 
-    def send_request(self, request: BaseRequest[PayloadType]) -> None:
+    def send_request(self, request: RequestAPI[Payload]) -> None:
         command = self.cmd_by_type[request.cmd_type]
         header, body = command.encode(request.command_payload)
         self.transport.send(header, body)
 
-    def supports_command(self, cmd_type: Type[Command]) -> bool:
+    def supports_command(self, cmd_type: Type[CommandAPI]) -> bool:
         return cmd_type in self.cmd_by_type
 
     @classmethod
-    def as_capability(cls) -> CapabilityType:
+    def as_capability(cls) -> Capability:
         return (cls.name, cls.version)
 
     def __repr__(self) -> str:
         return "(%s, %d)" % (self.name, self.version)
 
 
-CapabilitiesType = Tuple[CapabilityType, ...]
-
-
 @to_tuple
-def match_protocols_with_capabilities(protocols: Sequence[Type[Protocol]],
-                                      capabilities: CapabilitiesType) -> Iterable[Type[Protocol]]:
+def match_protocols_with_capabilities(protocols: Sequence[Type[ProtocolAPI]],
+                                      capabilities: Capabilities,
+                                      ) -> Iterable[Type[ProtocolAPI]]:
     """
     Return the `Protocol` classes that match with the provided `capabilities`
     according to the RLPx protocol rules.
@@ -277,3 +227,17 @@ def _pad_to_16_byte_boundary(data: bytes) -> bytes:
     if remainder != 0:
         data += NULL_BYTE * (16 - remainder)
     return data
+
+
+def get_cmd_offsets(protocol_types: Sequence[Type[ProtocolAPI]]) -> Tuple[int, ...]:
+    """
+    Computes the `command_id_offsets` for each protocol.  The first offset is
+    always P2P_PROTOCOL_COMMAND_LENGTH since the first protocol always begins
+    after the base `p2p` protocol.  Each subsequent protocol is the accumulated
+    sum of all of the protocol offsets that came before it.
+    """
+    return tuple(accumulate(
+        lambda prev_offset, protocol_class: prev_offset + protocol_class.cmd_length,
+        protocol_types,
+        P2P_PROTOCOL_COMMAND_LENGTH,
+    ))[:-1]  # the `[:-1]` is to discard the last accumulated offset which is not needed

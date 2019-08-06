@@ -52,6 +52,14 @@ class MalformedMessage(BaseP2PError):
     pass
 
 
+class UnknownProtocol(BaseP2PError):
+    """
+    Raised in cases where a given protocol is not present such as not part of a
+    Multiplexer connection.
+    """
+    pass
+
+
 class UnknownProtocolCommand(BaseP2PError):
     """
     Raised when the received protocal command isn't known.
@@ -90,13 +98,6 @@ class LESAnnouncementProcessingError(BaseP2PError):
 class TooManyTimeouts(BaseP2PError):
     """
     Raised when too many timeouts occurred.
-    """
-    pass
-
-
-class RemoteDisconnected(BaseP2PError):
-    """
-    Raised when a remote disconnected.
     """
     pass
 

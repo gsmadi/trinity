@@ -14,7 +14,7 @@ from eth2.beacon.signature_domain import (
     SignatureDomain,
 )
 from eth2.beacon.helpers import (
-    bls_domain,
+    compute_domain,
 )
 from eth2.beacon.epoch_processing_helpers import (
     increase_balance,
@@ -26,9 +26,6 @@ from eth2.beacon.typing import (
     ValidatorIndex,
 )
 from eth2.configs import Eth2Config
-from eth2.beacon.exceptions import (
-    SignatureError,
-)
 
 
 def validate_deposit_proof(state: BeaconState,
@@ -38,16 +35,16 @@ def validate_deposit_proof(state: BeaconState,
     Validate if deposit branch proof is valid.
     """
     is_valid_proof = verify_merkle_branch(
-        leaf=deposit.data.root,
+        leaf=deposit.data.hash_tree_root,
         proof=deposit.proof,
-        depth=deposit_contract_tree_depth,
+        depth=deposit_contract_tree_depth + 1,
         index=state.eth1_deposit_index,
         root=state.eth1_data.deposit_root,
     )
     if not is_valid_proof:
         raise ValidationError(
             f"deposit.proof ({list(map(encode_hex, deposit.proof))}) is invalid against "
-            f"leaf={encode_hex(deposit.data.root)}, "
+            f"leaf={encode_hex(deposit.data.hash_tree_root)}, "
             f"deposit_contract_tree_depth={deposit_contract_tree_depth}, "
             f"deposit.index (via state) = {state.eth1_deposit_index} "
             f"state.eth1_data.deposit_root={state.eth1_data.deposit_root.hex()}"
@@ -74,17 +71,19 @@ def process_deposit(state: BeaconState,
     amount = deposit.data.amount
     validator_pubkeys = tuple(v.pubkey for v in state.validators)
     if pubkey not in validator_pubkeys:
-        # Verify the proof of possession
-        try:
-            bls.validate(
-                pubkey=pubkey,
-                message_hash=deposit.data.signing_root,
-                signature=deposit.data.signature,
-                domain=bls_domain(
-                    SignatureDomain.DOMAIN_DEPOSIT,
-                ),
-            )
-        except SignatureError:
+        # Verify the deposit signature (proof of possession) for new validators.
+        # Note: The deposit contract does not check signatures.
+        # Note: Deposits are valid across forks, thus the deposit domain
+        # is retrieved directly from `compute_domain`.
+        is_valid_proof_of_possession = bls.verify(
+            message_hash=deposit.data.signing_root,
+            pubkey=pubkey,
+            signature=deposit.data.signature,
+            domain=compute_domain(
+                SignatureDomain.DOMAIN_DEPOSIT,
+            ),
+        )
+        if not is_valid_proof_of_possession:
             return state
 
         withdrawal_credentials = deposit.data.withdrawal_credentials

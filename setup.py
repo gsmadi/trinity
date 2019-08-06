@@ -28,7 +28,7 @@ deps = {
         "cachetools>=3.1.0,<4.0.0",
         "coincurve>=10.0.0,<11.0.0",
         "dataclasses>=0.6, <1;python_version<'3.7'",
-        "eth-utils>=1.5.1,<2",
+        "eth-utils>=1.6.2,<2",
         "ipython>=6.2.1,<7.0.0",
         "plyvel==1.0.5",
         PYEVM_DEPENDENCY,
@@ -42,6 +42,10 @@ deps = {
         "typing_extensions>=3.7.2,<4.0.0",
         "ruamel.yaml==0.15.98",
         "argcomplete>=1.10.0,<2",
+        "multiaddr>=0.0.8,<0.1.0",
+        "pymultihash>=0.8.2",
+        # FIXME: Change to PyPI when the commit is released.
+        "libp2p @ git+https://git@github.com/libp2p/py-libp2p@69a3553"
     ],
     'test': [
         "hypothesis>=4.24.3,<5",
@@ -50,12 +54,11 @@ deps = {
         # pinned to <3.7 until async fixtures work again
         # https://github.com/pytest-dev/pytest-asyncio/issues/89
         "pytest>=3.6,<3.7",
-        # only needed for p2p
-        "pytest-asyncio-network-simulator==0.1.0a2;python_version>='3.6'",
         "pytest-cov==2.5.1",
         "pytest-watch>=4.1.0,<5",
         "pytest-xdist==1.18.1",
         "pytest-mock==1.10.4",
+        "pytest-randomly==3.0.0",
         # only for eth2
         "ruamel.yaml==0.15.98",
     ],
@@ -64,6 +67,7 @@ deps = {
     # See: https://github.com/ethereum/trinity/pull/790
     'test-asyncio': [
         "pytest-asyncio>=0.10.0,<0.11",
+        "pytest-asyncio-network-simulator==0.1.0a2;python_version>='3.6'",
     ],
     'test-trio': [
         'pytest-trio==0.5.2',
@@ -100,21 +104,11 @@ deps = {
     'eth2': [
         "cytoolz>=0.9.0,<1.0.0",
         "eth-typing>=2.1.0,<3.0.0",
-        "eth-utils>=1.3.0b0,<2.0.0",
         "lru-dict>=1.1.6",
-        "py-ecc==1.6.0",
+        "py-ecc==1.7.1",
         "rlp>=1.1.0,<2.0.0",
         PYEVM_DEPENDENCY,
-        "ssz==0.1.0a10",
-        "blspy>=0.1.8,<1",  # for `bls_chia`
-    ],
-    'libp2p': [
-        "base58>=1.0.3",
-        "multiaddr>=0.0.8,<0.1.0",
-        "protobuf>=3.6.1",
-        "pymultihash>=0.8.2",
-    ],
-    'bls-bindings': [
+        "ssz==0.1.3",
         "blspy>=0.1.8,<1",  # for `bls_chia`
     ],
 }
@@ -132,8 +126,7 @@ deps['dev'] = (
     deps['test'] +
     deps['doc'] +
     deps['lint'] +
-    deps['eth2'] +
-    deps['libp2p']
+    deps['eth2']
 )
 
 
@@ -147,7 +140,7 @@ with open('./README.md') as readme:
 setup(
     name='trinity',
     # *IMPORTANT*: Don't manually change the version here. Use the 'bumpversion' utility.
-    version='0.1.0-alpha.26',
+    version='0.1.0-alpha.27',
     description='The Trinity client for the Ethereum network',
     long_description=long_description,
     long_description_content_type='text/markdown',

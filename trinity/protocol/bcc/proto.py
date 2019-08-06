@@ -9,10 +9,11 @@ from eth_typing import (
 )
 from lahja import (
     BroadcastConfig,
+    EndpointAPI,
 )
 import ssz
 
-from p2p.kademlia import Node
+from p2p.abc import NodeAPI
 from p2p.protocol import Protocol
 
 from eth2.beacon.types.blocks import BaseBeaconBlock
@@ -21,9 +22,6 @@ from eth2.beacon.typing import (
     Slot,
 )
 
-from trinity.endpoint import (
-    TrinityEventBusEndpoint,
-)
 from trinity.protocol.bcc.commands import (
     Status,
     StatusMessage,
@@ -116,8 +114,8 @@ class ProxyBCCProtocol:
     """
 
     def __init__(self,
-                 remote: Node,
-                 event_bus: TrinityEventBusEndpoint,
+                 remote: NodeAPI,
+                 event_bus: EndpointAPI,
                  broadcast_config: BroadcastConfig):
         self.remote = remote
         self._event_bus = event_bus

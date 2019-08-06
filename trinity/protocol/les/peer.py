@@ -12,6 +12,8 @@ from cancel_token import CancelToken
 from eth.rlp.accounts import Account
 from eth.rlp.headers import BlockHeader
 from eth.rlp.receipts import Receipt
+from lahja import EndpointAPI
+
 from eth_typing import (
     BlockNumber,
     Hash32,
@@ -21,24 +23,14 @@ from eth_utils import encode_hex
 from lahja import (
     BroadcastConfig,
 )
-from p2p.exceptions import (
-    HandshakeFailure,
-)
-from p2p.kademlia import (
-    Node,
-)
+
+from p2p.abc import CommandAPI, NodeAPI
+from p2p.disconnect import DisconnectReason
+from p2p.exceptions import HandshakeFailure
 from p2p.peer_pool import BasePeerPool
-from p2p.p2p_proto import DisconnectReason
-from p2p.protocol import (
-    Command,
-    _DecodedMsgType,
-    PayloadType,
-)
+from p2p.typing import Payload
 
 from trinity.rlp.block_body import BlockBody
-from trinity.endpoint import (
-    TrinityEventBusEndpoint,
-)
 from trinity.exceptions import (
     WrongNetworkFailure,
     WrongGenesisFailure,
@@ -105,9 +97,9 @@ class LESPeer(BaseChainPeer):
             self._requests = LESExchangeHandler(self)
         return self._requests
 
-    def handle_sub_proto_msg(self, cmd: Command, msg: _DecodedMsgType) -> None:
-        head_info = cast(Dict[str, Union[int, Hash32, BlockNumber]], msg)
+    def handle_sub_proto_msg(self, cmd: CommandAPI, msg: Payload) -> None:
         if isinstance(cmd, Announce):
+            head_info = cast(Dict[str, Union[int, Hash32, BlockNumber]], msg)
             self.head_td = cast(int, head_info['head_td'])
             self.head_hash = cast(Hash32, head_info['head_hash'])
             self.head_number = cast(BlockNumber, head_info['head_number'])
@@ -118,7 +110,7 @@ class LESPeer(BaseChainPeer):
         self.sub_proto.send_handshake(await self._local_chain_info)
 
     async def process_sub_proto_handshake(
-            self, cmd: Command, msg: _DecodedMsgType) -> None:
+            self, cmd: CommandAPI, msg: Payload) -> None:
         if not isinstance(cmd, (Status, StatusV2)):
             await self.disconnect(DisconnectReason.subprotocol_error)
             raise HandshakeFailure(f"Expected a LES Status msg, got {cmd}, disconnecting")
@@ -162,8 +154,8 @@ class LESProxyPeer(BaseProxyPeer):
     """
 
     def __init__(self,
-                 remote: Node,
-                 event_bus: TrinityEventBusEndpoint,
+                 remote: NodeAPI,
+                 event_bus: EndpointAPI,
                  sub_proto: ProxyLESProtocol):
 
         super().__init__(remote, event_bus)
@@ -172,8 +164,8 @@ class LESProxyPeer(BaseProxyPeer):
 
     @classmethod
     def from_node(cls,
-                  remote: Node,
-                  event_bus: TrinityEventBusEndpoint,
+                  remote: NodeAPI,
+                  event_bus: EndpointAPI,
                   broadcast_config: BroadcastConfig) -> 'LESProxyPeer':
         return cls(remote, event_bus, ProxyLESProtocol(remote, event_bus, broadcast_config))
 
@@ -188,7 +180,7 @@ class LESPeerPoolEventServer(PeerPoolEventServer[LESPeer]):
     """
 
     def __init__(self,
-                 event_bus: TrinityEventBusEndpoint,
+                 event_bus: EndpointAPI,
                  peer_pool: BasePeerPool,
                  token: CancelToken = None,
                  chain: 'BaseLightPeerChain' = None) -> None:
@@ -252,9 +244,9 @@ class LESPeerPoolEventServer(PeerPoolEventServer[LESPeer]):
         return await self.chain.coro_get_contract_code(event.block_hash, event.address)
 
     async def handle_native_peer_message(self,
-                                         remote: Node,
-                                         cmd: Command,
-                                         msg: PayloadType) -> None:
+                                         remote: NodeAPI,
+                                         cmd: CommandAPI,
+                                         msg: Payload) -> None:
         if isinstance(cmd, GetBlockHeaders):
             await self.event_bus.broadcast(GetBlockHeadersEvent(remote, cmd, msg))
         else:
@@ -268,8 +260,8 @@ class LESPeerPool(BaseChainPeerPool):
 class LESProxyPeerPool(BaseProxyPeerPool[LESProxyPeer]):
 
     def convert_node_to_proxy_peer(self,
-                                   remote: Node,
-                                   event_bus: TrinityEventBusEndpoint,
+                                   remote: NodeAPI,
+                                   event_bus: EndpointAPI,
                                    broadcast_config: BroadcastConfig) -> LESProxyPeer:
         return LESProxyPeer.from_node(
             remote,

@@ -21,21 +21,15 @@ from eth_utils import (
 )
 from lahja import (
     BroadcastConfig,
+    EndpointAPI,
 )
 from trie.exceptions import (
     MissingTrieNode,
 )
-from p2p import protocol
-from p2p.kademlia import (
-    Node,
-)
-from p2p.protocol import (
-    Command,
-)
 
-from trinity.endpoint import (
-    TrinityEventBusEndpoint,
-)
+from p2p.abc import CommandAPI, NodeAPI
+from p2p.typing import Payload
+
 from trinity.db.eth1.chain import BaseAsyncChainDB
 from trinity.protocol.common.servers import (
     BaseIsolatedRequestServer,
@@ -179,7 +173,7 @@ class ETHRequestServer(BaseIsolatedRequestServer):
 
     def __init__(
             self,
-            event_bus: TrinityEventBusEndpoint,
+            event_bus: EndpointAPI,
             broadcast_config: BroadcastConfig,
             db: BaseAsyncChainDB,
             token: CancelToken = None) -> None:
@@ -192,9 +186,9 @@ class ETHRequestServer(BaseIsolatedRequestServer):
         self._handler = ETHPeerRequestHandler(db, self.cancel_token)
 
     async def _handle_msg(self,
-                          remote: Node,
-                          cmd: Command,
-                          msg: protocol._DecodedMsgType) -> None:
+                          remote: NodeAPI,
+                          cmd: CommandAPI,
+                          msg: Payload) -> None:
 
         self.logger.debug2("Peer %s requested %s", remote, cmd)
         peer = ETHProxyPeer.from_node(remote, self.event_bus, self.broadcast_config)

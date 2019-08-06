@@ -5,27 +5,23 @@ from typing import (
     Tuple,
 )
 
+from lahja import EndpointAPI
+
 from eth.rlp.headers import BlockHeader
 from eth_utils import encode_hex
 from lahja import (
     BroadcastConfig,
 )
+
+from p2p.abc import CommandAPI, NodeAPI
 from p2p.exceptions import (
     HandshakeFailure,
 )
-from p2p.kademlia import (
-    Node,
-)
-from p2p.p2p_proto import DisconnectReason
+from p2p.disconnect import DisconnectReason
 from p2p.protocol import (
-    Command,
-    _DecodedMsgType,
-    PayloadType,
+    Payload,
 )
 
-from trinity.endpoint import (
-    TrinityEventBusEndpoint,
-)
 from trinity.exceptions import (
     WrongNetworkFailure,
     WrongGenesisFailure,
@@ -66,6 +62,7 @@ from .events import (
     GetNodeDataEvent,
     GetNodeDataRequest,
     GetReceiptsRequest,
+    NewBlockEvent,
     NewBlockHashesEvent,
     SendBlockBodiesEvent,
     SendBlockHeadersEvent,
@@ -97,7 +94,7 @@ class ETHPeer(BaseChainPeer):
             self._requests = ETHExchangeHandler(self)
         return self._requests
 
-    def handle_sub_proto_msg(self, cmd: Command, msg: _DecodedMsgType) -> None:
+    def handle_sub_proto_msg(self, cmd: CommandAPI, msg: Payload) -> None:
         if isinstance(cmd, NewBlock):
             msg = cast(Dict[str, Any], msg)
             header, _, _ = msg['block']
@@ -113,7 +110,7 @@ class ETHPeer(BaseChainPeer):
         self.sub_proto.send_handshake(await self._local_chain_info)
 
     async def process_sub_proto_handshake(
-            self, cmd: Command, msg: _DecodedMsgType) -> None:
+            self, cmd: CommandAPI, msg: Payload) -> None:
         if not isinstance(cmd, Status):
             await self.disconnect(DisconnectReason.subprotocol_error)
             raise HandshakeFailure(f"Expected a ETH Status msg, got {cmd}, disconnecting")
@@ -149,8 +146,8 @@ class ETHProxyPeer(BaseProxyPeer):
     """
 
     def __init__(self,
-                 remote: Node,
-                 event_bus: TrinityEventBusEndpoint,
+                 remote: NodeAPI,
+                 event_bus: EndpointAPI,
                  sub_proto: ProxyETHProtocol,
                  requests: ProxyETHExchangeHandler):
 
@@ -161,8 +158,8 @@ class ETHProxyPeer(BaseProxyPeer):
 
     @classmethod
     def from_node(cls,
-                  remote: Node,
-                  event_bus: TrinityEventBusEndpoint,
+                  remote: NodeAPI,
+                  event_bus: EndpointAPI,
                   broadcast_config: BroadcastConfig) -> 'ETHProxyPeer':
         return cls(
             remote,
@@ -188,6 +185,7 @@ class ETHPeerPoolEventServer(PeerPoolEventServer[ETHPeer]):
         GetNodeData,
         Transactions,
         NewBlockHashes,
+        NewBlock,
     })
 
     async def _run(self) -> None:
@@ -266,9 +264,9 @@ class ETHPeerPoolEventServer(PeerPoolEventServer[ETHPeer]):
         )
 
     async def handle_native_peer_message(self,
-                                         remote: Node,
-                                         cmd: Command,
-                                         msg: PayloadType) -> None:
+                                         remote: NodeAPI,
+                                         cmd: CommandAPI,
+                                         msg: Payload) -> None:
 
         if isinstance(cmd, GetBlockHeaders):
             await self.event_bus.broadcast(GetBlockHeadersEvent(remote, cmd, msg))
@@ -278,6 +276,8 @@ class ETHPeerPoolEventServer(PeerPoolEventServer[ETHPeer]):
             await self.event_bus.broadcast(GetReceiptsEvent(remote, cmd, msg))
         elif isinstance(cmd, GetNodeData):
             await self.event_bus.broadcast(GetNodeDataEvent(remote, cmd, msg))
+        elif isinstance(cmd, NewBlock):
+            await self.event_bus.broadcast(NewBlockEvent(remote, cmd, msg))
         elif isinstance(cmd, NewBlockHashes):
             await self.event_bus.broadcast(NewBlockHashesEvent(remote, cmd, msg))
         elif isinstance(cmd, Transactions):
@@ -293,8 +293,8 @@ class ETHPeerPool(BaseChainPeerPool):
 class ETHProxyPeerPool(BaseProxyPeerPool[ETHProxyPeer]):
 
     def convert_node_to_proxy_peer(self,
-                                   remote: Node,
-                                   event_bus: TrinityEventBusEndpoint,
+                                   remote: NodeAPI,
+                                   event_bus: EndpointAPI,
                                    broadcast_config: BroadcastConfig) -> ETHProxyPeer:
         return ETHProxyPeer.from_node(
             remote,

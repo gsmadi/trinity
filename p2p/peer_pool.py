@@ -10,7 +10,6 @@ from typing import (
     Dict,
     Iterator,
     List,
-    Set,
     Tuple,
     Type,
 )
@@ -23,6 +22,7 @@ from eth_keys import (
     datatypes,
 )
 from eth_utils import (
+    clamp,
     humanize_seconds,
 )
 from eth_utils.toolz import (
@@ -30,11 +30,11 @@ from eth_utils.toolz import (
     take,
 )
 from lahja import (
-    AsyncioEndpoint,
     BroadcastConfig,
+    EndpointAPI,
 )
 
-from p2p._utils import clamp
+from p2p.abc import NodeAPI
 from p2p.constants import (
     DEFAULT_MAX_PEERS,
     DEFAULT_PEER_BOOT_TIMEOUT,
@@ -53,9 +53,6 @@ from p2p.exceptions import (
     PeerConnectionLost,
     UnreachablePeer,
 )
-from p2p.kademlia import (
-    Node,
-)
 from p2p.peer import (
     BasePeer,
     BasePeerFactory,
@@ -69,8 +66,11 @@ from p2p.peer_backend import (
     DiscoveryPeerBackend,
     BootnodesPeerBackend,
 )
-from p2p.p2p_proto import (
+from p2p.disconnect import (
     DisconnectReason,
+)
+from p2p.resource_lock import (
+    ResourceLock,
 )
 from p2p.service import (
     BaseService,
@@ -107,14 +107,14 @@ class BasePeerPool(BaseService, AsyncIterable[BasePeer]):
     """
     _report_interval = 60
     _peer_boot_timeout = DEFAULT_PEER_BOOT_TIMEOUT
-    _event_bus: AsyncioEndpoint = None
+    _event_bus: EndpointAPI = None
 
     def __init__(self,
                  privkey: datatypes.PrivateKey,
                  context: BasePeerContext,
                  max_peers: int = DEFAULT_MAX_PEERS,
                  token: CancelToken = None,
-                 event_bus: AsyncioEndpoint = None,
+                 event_bus: EndpointAPI = None,
                  ) -> None:
         super().__init__(token)
 
@@ -122,7 +122,7 @@ class BasePeerPool(BaseService, AsyncIterable[BasePeer]):
         self.max_peers = max_peers
         self.context = context
 
-        self.connected_nodes: Dict[Node, BasePeer] = {}
+        self.connected_nodes: Dict[NodeAPI, BasePeer] = {}
 
         self._subscribers: List[PeerSubscriber] = []
         self._event_bus = event_bus
@@ -131,8 +131,7 @@ class BasePeerPool(BaseService, AsyncIterable[BasePeer]):
         self._connection_attempt_lock = asyncio.BoundedSemaphore(MAX_CONCURRENT_CONNECTION_ATTEMPTS)
 
         # Ensure we can only have a single concurrent handshake in flight per remote
-        self._handshake_lock = asyncio.Lock()
-        self._inflight_handshakes: Set[Node] = set()
+        self._handshake_locks = ResourceLock()
 
         self.peer_backends = self.setup_peer_backends()
         self.connection_tracker = self.setup_connection_tracker()
@@ -141,7 +140,7 @@ class BasePeerPool(BaseService, AsyncIterable[BasePeer]):
     def has_event_bus(self) -> bool:
         return self._event_bus is not None
 
-    def get_event_bus(self) -> AsyncioEndpoint:
+    def get_event_bus(self) -> EndpointAPI:
         if self._event_bus is None:
             raise AttributeError("No event bus configured for this peer pool")
         return self._event_bus
@@ -227,7 +226,7 @@ class BasePeerPool(BaseService, AsyncIterable[BasePeer]):
     def is_full(self) -> bool:
         return len(self) >= self.max_peers
 
-    def is_valid_connection_candidate(self, candidate: Node) -> bool:
+    def is_valid_connection_candidate(self, candidate: NodeAPI) -> bool:
         # connect to no more then 2 nodes with the same IP
         nodes_by_ip = groupby(
             operator.attrgetter('address.ip'),
@@ -311,75 +310,68 @@ class BasePeerPool(BaseService, AsyncIterable[BasePeer]):
     async def _cleanup(self) -> None:
         await self.stop_all_peers()
 
-    async def connect(self, remote: Node) -> BasePeer:
+    async def connect(self, remote: NodeAPI) -> BasePeer:
         """
         Connect to the given remote and return a Peer instance when successful.
         Returns None if the remote is unreachable, times out or is useless.
         """
-        if remote in self.connected_nodes:
-            self.logger.debug2("Skipping %s; already connected to it", remote)
-            raise IneligiblePeer(f"Already connected to {remote}")
+        if self._handshake_locks.is_locked(remote):
+            self.logger.debug2("Skipping %s; already shaking hands", remote)
+            raise IneligiblePeer(f"Already shaking hands with {remote}")
 
-        async with self._handshake_lock:
-            if remote in self._inflight_handshakes:
-                self.logger.debug2("Skipping %s; already shaking hands", remote)
-                raise IneligiblePeer(f"Already shaking hands with {remote}")
-            else:
-                self._inflight_handshakes.add(remote)
+        async with self._handshake_locks.lock(remote):
 
-        try:
-            should_connect = await self.wait(
-                self.connection_tracker.should_connect_to(remote),
-                timeout=1,
-            )
-        except TimeoutError:
-            self.logger.warning("ConnectionTracker.should_connect_to request timed out.")
-            raise
+            if remote in self.connected_nodes:
+                self.logger.debug2("Skipping %s; already connected to it", remote)
+                raise IneligiblePeer(f"Already connected to {remote}")
 
-        if not should_connect:
-            raise IneligiblePeer(f"Peer database rejected peer candidate: {remote}")
+            try:
+                should_connect = await self.wait(
+                    self.connection_tracker.should_connect_to(remote),
+                    timeout=1,
+                )
+            except TimeoutError:
+                self.logger.warning("ConnectionTracker.should_connect_to request timed out.")
+                raise
 
-        try:
-            self.logger.debug2("Connecting to %s...", remote)
-            # We use self.wait() as well as passing our CancelToken to handshake() as a workaround
-            # for https://github.com/ethereum/py-evm/issues/670.
-            peer = await self.wait(handshake(remote, self.get_peer_factory()))
-            return peer
-        except OperationCancelled:
-            # Pass it on to instruct our main loop to stop.
-            raise
-        except BadAckMessage:
-            # This is kept separate from the
-            # `COMMON_PEER_CONNECTION_EXCEPTIONS` to be sure that we aren't
-            # silencing an error in our authentication code.
-            self.logger.error('Got bad auth ack from %r', remote)
-            # dump the full stacktrace in the debug logs
-            self.logger.debug('Got bad auth ack from %r', remote, exc_info=True)
-            raise
-        except MalformedMessage:
-            # This is kept separate from the
-            # `COMMON_PEER_CONNECTION_EXCEPTIONS` to be sure that we aren't
-            # silencing an error in how we decode messages during handshake.
-            self.logger.error('Got malformed response from %r during handshake', remote)
-            # dump the full stacktrace in the debug logs
-            self.logger.debug('Got malformed response from %r', remote, exc_info=True)
-            raise
-        except HandshakeFailure as e:
-            self.logger.debug("Could not complete handshake with %r: %s", remote, repr(e))
-            self.connection_tracker.record_failure(remote, e)
-            raise
-        except COMMON_PEER_CONNECTION_EXCEPTIONS as e:
-            self.logger.debug("Could not complete handshake with %r: %s", remote, repr(e))
-            raise
-        except Exception:
-            self.logger.exception("Unexpected error during auth/p2p handshake with %r", remote)
-            raise
-        finally:
-            async with self._handshake_lock:
-                self.logger.debug("Removing %s from connect_lock", remote)
-                self._inflight_handshakes.remove(remote)
+            if not should_connect:
+                raise IneligiblePeer(f"Peer database rejected peer candidate: {remote}")
 
-    async def connect_to_nodes(self, nodes: Iterator[Node]) -> None:
+            try:
+                self.logger.debug2("Connecting to %s...", remote)
+                peer = await self.wait(handshake(remote, self.get_peer_factory()))
+                return peer
+            except OperationCancelled:
+                # Pass it on to instruct our main loop to stop.
+                raise
+            except BadAckMessage:
+                # This is kept separate from the
+                # `COMMON_PEER_CONNECTION_EXCEPTIONS` to be sure that we aren't
+                # silencing an error in our authentication code.
+                self.logger.error('Got bad auth ack from %r', remote)
+                # dump the full stacktrace in the debug logs
+                self.logger.debug('Got bad auth ack from %r', remote, exc_info=True)
+                raise
+            except MalformedMessage:
+                # This is kept separate from the
+                # `COMMON_PEER_CONNECTION_EXCEPTIONS` to be sure that we aren't
+                # silencing an error in how we decode messages during handshake.
+                self.logger.error('Got malformed response from %r during handshake', remote)
+                # dump the full stacktrace in the debug logs
+                self.logger.debug('Got malformed response from %r', remote, exc_info=True)
+                raise
+            except HandshakeFailure as e:
+                self.logger.debug("Could not complete handshake with %r: %s", remote, repr(e))
+                self.connection_tracker.record_failure(remote, e)
+                raise
+            except COMMON_PEER_CONNECTION_EXCEPTIONS as e:
+                self.logger.debug("Could not complete handshake with %r: %s", remote, repr(e))
+                raise
+            except Exception:
+                self.logger.exception("Unexpected error during auth/p2p handshake with %r", remote)
+                raise
+
+    async def connect_to_nodes(self, nodes: Iterator[NodeAPI]) -> None:
         # create an generator for the nodes
         nodes_iter = iter(nodes)
 
@@ -408,7 +400,7 @@ class BasePeerPool(BaseService, AsyncIterable[BasePeer]):
                 loop=self.get_event_loop(),
             ))
 
-    async def connect_to_node(self, node: Node) -> None:
+    async def connect_to_node(self, node: NodeAPI) -> None:
         """
         Connect to a single node quietly aborting if the peer pool is full or
         shutting down, or one of the expected peer level exceptions is raised
@@ -479,7 +471,7 @@ class BasePeerPool(BaseService, AsyncIterable[BasePeer]):
             if subscribers:
                 longest_queue = max(
                     self._subscribers, key=operator.attrgetter('queue_size'))
-                self.logger.info(
+                self.logger.debug(
                     "Peer subscribers: %d, longest queue: %s(%d)",
                     subscribers, longest_queue.__class__.__name__, longest_queue.queue_size)
 

@@ -28,20 +28,14 @@ from eth_utils import (
 
 from lahja import (
     BroadcastConfig,
+    EndpointAPI,
 )
 
 import ssz
 
-from p2p import protocol
-from p2p.kademlia import (
-    Node,
-)
-from p2p.peer import (
-    BasePeer,
-)
-from p2p.protocol import (
-    Command,
-)
+from p2p.abc import CommandAPI, NodeAPI
+from p2p.peer import BasePeer
+from p2p.typing import Payload
 
 from eth2.beacon.typing import (
     Slot,
@@ -73,9 +67,6 @@ from trinity._utils.shellart import (
 from trinity.exceptions import (
     AttestationNotFound,
 )
-from trinity.endpoint import (
-    TrinityEventBusEndpoint,
-)
 from trinity.db.beacon.chain import (
     BaseAsyncBeaconChainDB,
 )
@@ -104,12 +95,12 @@ from trinity.protocol.bcc.peer import (
 
 
 class BCCRequestServer(BaseIsolatedRequestServer):
-    subscription_msg_types: FrozenSet[Type[Command]] = frozenset({
+    subscription_msg_types: FrozenSet[Type[CommandAPI]] = frozenset({
         GetBeaconBlocks,
     })
 
     def __init__(self,
-                 event_bus: TrinityEventBusEndpoint,
+                 event_bus: EndpointAPI,
                  broadcast_config: BroadcastConfig,
                  db: BaseAsyncBeaconChainDB,
                  token: CancelToken = None) -> None:
@@ -122,9 +113,9 @@ class BCCRequestServer(BaseIsolatedRequestServer):
         self.db = db
 
     async def _handle_msg(self,
-                          remote: Node,
-                          cmd: Command,
-                          msg: protocol._DecodedMsgType) -> None:
+                          remote: NodeAPI,
+                          cmd: CommandAPI,
+                          msg: Payload) -> None:
 
         self.logger.debug("cmd %s" % cmd)
         if isinstance(cmd, GetBeaconBlocks):
@@ -132,7 +123,7 @@ class BCCRequestServer(BaseIsolatedRequestServer):
         else:
             raise Exception(f"Invariant: Only subscribed to {self.subscription_msg_types}")
 
-    async def _handle_get_beacon_blocks(self, remote: Node, msg: GetBeaconBlocksMessage) -> None:
+    async def _handle_get_beacon_blocks(self, remote: NodeAPI, msg: GetBeaconBlocksMessage) -> None:
 
         peer = BCCProxyPeer.from_node(remote, self.event_bus, self.broadcast_config)
 
@@ -230,7 +221,7 @@ class AttestationPool:
     def __contains__(self, attestation_or_root: Union[Attestation, Hash32]) -> bool:
         attestation_root: Hash32
         if isinstance(attestation_or_root, Attestation):
-            attestation_root = attestation_or_root.root
+            attestation_root = attestation_or_root.hash_tree_root
         elif isinstance(attestation_or_root, bytes):
             attestation_root = attestation_or_root
         else:
@@ -246,7 +237,7 @@ class AttestationPool:
 
     def get(self, attestation_root: Hash32) -> Attestation:
         for attestation in self._pool:
-            if attestation.root == attestation_root:
+            if attestation.hash_tree_root == attestation_root:
                 return attestation
         raise AttestationNotFound(
             f"No attestation with root {encode_hex(attestation_root)} is found.")
@@ -315,7 +306,7 @@ class OrphanBlockPool:
 
 
 class BCCReceiveServer(BaseReceiveServer):
-    subscription_msg_types: FrozenSet[Type[Command]] = frozenset({
+    subscription_msg_types: FrozenSet[Type[CommandAPI]] = frozenset({
         Attestations,
         BeaconBlocks,
         NewBeaconBlock,
@@ -336,8 +327,8 @@ class BCCReceiveServer(BaseReceiveServer):
         self.map_request_id_block_root = {}
         self.orphan_block_pool = OrphanBlockPool()
 
-    async def _handle_msg(self, base_peer: BasePeer, cmd: Command,
-                          msg: protocol._DecodedMsgType) -> None:
+    async def _handle_msg(self, base_peer: BasePeer, cmd: CommandAPI,
+                          msg: Payload) -> None:
         peer = cast(BCCPeer, base_peer)
         self.logger.debug("cmd %s" % cmd)
         if isinstance(cmd, Attestations):
@@ -417,10 +408,10 @@ class BCCReceiveServer(BaseReceiveServer):
         Check if the attestation is already in the database or the attestion pool.
         """
         try:
-            if attestation.root in self.attestation_pool:
+            if attestation.hash_tree_root in self.attestation_pool:
                 return True
             else:
-                return not self.chain.attestation_exists(attestation.root)
+                return not self.chain.attestation_exists(attestation.hash_tree_root)
         except AttestationNotFound:
             return True
 

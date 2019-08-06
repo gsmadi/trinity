@@ -5,16 +5,12 @@ from typing import (
 )
 
 from lahja import (
-    AsyncioEndpoint,
     BroadcastConfig,
+    EndpointAPI,
 )
 
-from p2p.constants import (
-    DISCOVERY_EVENTBUS_ENDPOINT,
-)
-from p2p.kademlia import (
-    Node,
-)
+from p2p.abc import NodeAPI
+from p2p.constants import DISCOVERY_EVENTBUS_ENDPOINT
 from p2p.events import (
     PeerCandidatesRequest,
     RandomBootnodeRequest,
@@ -25,7 +21,7 @@ class BasePeerBackend(ABC):
     @abstractmethod
     async def get_peer_candidates(self,
                                   num_requested: int,
-                                  connected_remotes: Set[Node]) -> Tuple[Node, ...]:
+                                  connected_remotes: Set[NodeAPI]) -> Tuple[NodeAPI, ...]:
         pass
 
 
@@ -33,12 +29,13 @@ TO_DISCOVERY_BROADCAST_CONFIG = BroadcastConfig(filter_endpoint=DISCOVERY_EVENTB
 
 
 class DiscoveryPeerBackend(BasePeerBackend):
-    def __init__(self, event_bus: AsyncioEndpoint) -> None:
+    def __init__(self, event_bus: EndpointAPI) -> None:
         self.event_bus = event_bus
 
     async def get_peer_candidates(self,
                                   num_requested: int,
-                                  connected_remotes: Set[Node]) -> Tuple[Node, ...]:
+                                  connected_remotes: Set[NodeAPI]) -> Tuple[NodeAPI, ...]:
+        await self.event_bus.wait_until_any_endpoint_subscribed_to(PeerCandidatesRequest)
         response = await self.event_bus.request(
             PeerCandidatesRequest(num_requested),
             TO_DISCOVERY_BROADCAST_CONFIG,
@@ -51,13 +48,14 @@ class DiscoveryPeerBackend(BasePeerBackend):
 
 
 class BootnodesPeerBackend(BasePeerBackend):
-    def __init__(self, event_bus: AsyncioEndpoint) -> None:
+    def __init__(self, event_bus: EndpointAPI) -> None:
         self.event_bus = event_bus
 
     async def get_peer_candidates(self,
                                   num_requested: int,
-                                  connected_remotes: Set[Node]) -> Tuple[Node, ...]:
+                                  connected_remotes: Set[NodeAPI]) -> Tuple[NodeAPI, ...]:
         if len(connected_remotes) == 0:
+            await self.event_bus.wait_until_any_endpoint_subscribed_to(RandomBootnodeRequest)
             response = await self.event_bus.request(
                 RandomBootnodeRequest(),
                 TO_DISCOVERY_BROADCAST_CONFIG

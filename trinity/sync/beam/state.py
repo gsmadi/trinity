@@ -10,6 +10,9 @@ from typing import (
     Type,
 )
 
+from lahja import EndpointAPI
+
+import rlp
 
 from eth_hash.auto import keccak
 from eth_utils import (
@@ -24,20 +27,17 @@ from eth_typing import (
 
 from cancel_token import CancelToken, OperationCancelled
 
-
+from p2p.abc import CommandAPI
 from p2p.exceptions import BaseP2PError, PeerConnectionLost
 from p2p.peer import BasePeer, PeerSubscriber
-from p2p.protocol import Command
 from p2p.service import BaseService
 
-import rlp
 from trie import HexaryTrie
 from trie.exceptions import MissingTrieNode
 
 from trinity._utils.datastructures import TaskQueue
 from trinity._utils.timer import Timer
 from trinity.db.base import BaseAsyncDB
-from trinity.endpoint import TrinityEventBusEndpoint
 from trinity.protocol.common.types import (
     NodeDataBundles,
 )
@@ -76,7 +76,7 @@ class BeamDownloader(BaseService, PeerSubscriber):
     _reply_timeout = 20  # seconds
 
     # We are only interested in peers entering or leaving the pool
-    subscription_msg_types: FrozenSet[Type[Command]] = frozenset()
+    subscription_msg_types: FrozenSet[Type[CommandAPI]] = frozenset()
 
     # This is a rather arbitrary value, but when the sync is operating normally we never see
     # the msg queue grow past a few hundred items, so this should be a reasonable limit for
@@ -87,7 +87,7 @@ class BeamDownloader(BaseService, PeerSubscriber):
             self,
             db: BaseAsyncDB,
             peer_pool: ETHPeerPool,
-            event_bus: TrinityEventBusEndpoint,
+            event_bus: EndpointAPI,
             token: CancelToken = None) -> None:
         super().__init__(token)
         self._db = db

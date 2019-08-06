@@ -9,7 +9,8 @@ from eth_typing import (
     Hash32,
 )
 
-from trinity.db.beacon.chain import BaseAsyncBeaconChainDB
+from lahja import EndpointAPI
+
 from eth2.beacon.types.blocks import (
     BeaconBlock,
 )
@@ -21,23 +22,17 @@ from lahja import (
     BroadcastConfig,
 )
 
+from p2p.abc import CommandAPI, NodeAPI
+from p2p.disconnect import DisconnectReason
+from p2p.exceptions import HandshakeFailure
 from p2p.peer import (
     BasePeer,
     BasePeerFactory,
 )
-from p2p.peer_pool import (
-    BasePeerPool,
-)
-from p2p.protocol import (
-    Command,
-    _DecodedMsgType,
-    PayloadType,
-)
-from p2p.exceptions import HandshakeFailure
-from p2p.kademlia import Node
-from p2p.p2p_proto import DisconnectReason
+from p2p.peer_pool import BasePeerPool
+from p2p.protocol import Payload
 
-from trinity.endpoint import TrinityEventBusEndpoint
+from trinity.db.beacon.chain import BaseAsyncBeaconChainDB
 from trinity.protocol.bcc.handlers import BCCExchangeHandler
 
 from trinity.protocol.bcc.proto import BCCProtocol, ProxyBCCProtocol
@@ -69,8 +64,8 @@ class BCCProxyPeer(BaseProxyPeer):
     """
 
     def __init__(self,
-                 remote: Node,
-                 event_bus: TrinityEventBusEndpoint,
+                 remote: NodeAPI,
+                 event_bus: EndpointAPI,
                  sub_proto: ProxyBCCProtocol):
 
         super().__init__(remote, event_bus)
@@ -79,8 +74,8 @@ class BCCProxyPeer(BaseProxyPeer):
 
     @classmethod
     def from_node(cls,
-                  remote: Node,
-                  event_bus: TrinityEventBusEndpoint,
+                  remote: NodeAPI,
+                  event_bus: EndpointAPI,
                   broadcast_config: BroadcastConfig) -> 'BCCProxyPeer':
         return cls(remote, event_bus, ProxyBCCProtocol(remote, event_bus, broadcast_config))
 
@@ -103,7 +98,7 @@ class BCCPeer(BasePeer):
         head = await self.chain_db.coro_get_canonical_head(BeaconBlock)
         self.sub_proto.send_handshake(genesis_root, head.slot, self.network_id)
 
-    async def process_sub_proto_handshake(self, cmd: Command, msg: _DecodedMsgType) -> None:
+    async def process_sub_proto_handshake(self, cmd: CommandAPI, msg: Payload) -> None:
         if not isinstance(cmd, Status):
             await self.disconnect(DisconnectReason.subprotocol_error)
             raise HandshakeFailure(f"Expected a BCC Status msg, got {cmd}, disconnecting")
@@ -175,9 +170,9 @@ class BCCPeerPoolEventServer(PeerPoolEventServer[BCCPeer]):
         await super()._run()
 
     async def handle_native_peer_message(self,
-                                         remote: Node,
-                                         cmd: Command,
-                                         msg: PayloadType) -> None:
+                                         remote: NodeAPI,
+                                         cmd: CommandAPI,
+                                         msg: Payload) -> None:
 
         if isinstance(cmd, GetBeaconBlocks):
             await self.event_bus.broadcast(GetBeaconBlocksEvent(remote, cmd, msg))

@@ -9,37 +9,33 @@ from typing import (
     Type,
     TypeVar,
 )
+from lahja import EndpointAPI
 
 from eth_keys import datatypes
 from cancel_token import CancelToken, OperationCancelled
 from eth_typing import BlockNumber
 from eth.vm.base import BaseVM
 
-from p2p.constants import (
-    DEFAULT_MAX_PEERS,
-)
+from p2p.abc import NodeAPI
+from p2p.constants import DEFAULT_MAX_PEERS
+from p2p.disconnect import DisconnectReason
 from p2p.exceptions import (
     HandshakeFailure,
     PeerConnectionLost,
 )
-from p2p.kademlia import (
-    Node,
-)
-from p2p.p2p_proto import (
-    DisconnectReason,
-)
+from p2p.kademlia import Node
+from p2p.peer import receive_handshake
 from p2p.service import BaseService
-from p2p.transport import Transport
 
 from eth2.beacon.chains.base import BeaconChain
 
+from trinity._utils.version import construct_trinity_client_identifier
 from trinity.chains.base import BaseAsyncChain
 from trinity.constants import DEFAULT_PREFERRED_NODES
 from trinity.db.base import BaseAsyncDB
 from trinity.db.eth1.chain import BaseAsyncChainDB
 from trinity.db.eth1.header import BaseAsyncHeaderDB
 from trinity.db.beacon.chain import BaseAsyncBeaconChainDB
-from trinity.endpoint import TrinityEventBusEndpoint
 from trinity.protocol.common.context import ChainContext
 from trinity.protocol.common.peer import BasePeerPool
 from trinity.protocol.eth.peer import ETHPeerPool
@@ -71,9 +67,9 @@ class BaseServer(BaseService, Generic[TPeerPool]):
                  base_db: BaseAsyncDB,
                  network_id: int,
                  max_peers: int = DEFAULT_MAX_PEERS,
-                 bootstrap_nodes: Tuple[Node, ...] = None,
-                 preferred_nodes: Sequence[Node] = None,
-                 event_bus: TrinityEventBusEndpoint = None,
+                 bootstrap_nodes: Sequence[NodeAPI] = None,
+                 preferred_nodes: Sequence[NodeAPI] = None,
+                 event_bus: EndpointAPI = None,
                  token: CancelToken = None,
                  ) -> None:
         super().__init__(token)
@@ -166,15 +162,8 @@ class BaseServer(BaseService, Generic[TPeerPool]):
 
     async def _receive_handshake(
             self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        transport = await Transport.receive_connection(
-            reader=reader,
-            writer=writer,
-            private_key=self.privkey,
-            token=self.cancel_token,
-        )
-
         factory = self.peer_pool.get_peer_factory()
-        peer = factory.create_peer(transport, inbound=True)
+        peer = await receive_handshake(reader, writer, factory)
 
         if self.peer_pool.is_full:
             await peer.disconnect(DisconnectReason.too_many_peers)
@@ -195,8 +184,6 @@ class BaseServer(BaseService, Generic[TPeerPool]):
             await peer.disconnect(DisconnectReason.too_many_peers)
             return
 
-        await peer.do_p2p_handshake()
-        await peer.do_sub_proto_handshake()
         await self.peer_pool.start_peer(peer)
 
 
@@ -207,6 +194,8 @@ class FullServer(BaseServer[ETHPeerPool]):
             headerdb=self.headerdb,
             network_id=self.network_id,
             vm_configuration=self.chain.vm_configuration,
+            client_version_string=construct_trinity_client_identifier(),
+            listen_port=self.port,
         )
         return ETHPeerPool(
             privkey=self.privkey,
@@ -224,6 +213,8 @@ class LightServer(BaseServer[LESPeerPool]):
             headerdb=self.headerdb,
             network_id=self.network_id,
             vm_configuration=self.chain.vm_configuration,
+            client_version_string=construct_trinity_client_identifier(),
+            listen_port=self.port,
         )
         return LESPeerPool(
             privkey=self.privkey,
@@ -245,9 +236,9 @@ class BCCServer(BaseServer[BCCPeerPool]):
                  base_db: BaseAsyncDB,
                  network_id: int,
                  max_peers: int = DEFAULT_MAX_PEERS,
-                 bootstrap_nodes: Tuple[Node, ...] = None,
-                 preferred_nodes: Sequence[Node] = None,
-                 event_bus: TrinityEventBusEndpoint = None,
+                 bootstrap_nodes: Sequence[NodeAPI] = None,
+                 preferred_nodes: Sequence[NodeAPI] = None,
+                 event_bus: EndpointAPI = None,
                  token: CancelToken = None,
                  ) -> None:
         super().__init__(
@@ -287,6 +278,8 @@ class BCCServer(BaseServer[BCCPeerPool]):
         context = BeaconContext(
             chain_db=cast(BaseAsyncBeaconChainDB, self.chaindb),
             network_id=self.network_id,
+            client_version_string=construct_trinity_client_identifier(),
+            listen_port=self.port,
         )
         return BCCPeerPool(
             privkey=self.privkey,

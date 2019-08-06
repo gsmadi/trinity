@@ -14,11 +14,12 @@ from rlp.sedes import (
 )
 from rlp.exceptions import (
     DecodingError,
+    DeserializationError,
 )
 
 from eth_utils import (
-    is_bytes,
     encode_hex,
+    is_bytes,
     is_list_like,
     ValidationError,
 )
@@ -32,11 +33,14 @@ from eth.validation import (
 )
 
 from p2p.discv5.encryption import (
+    aesgcm_decrypt,
     aesgcm_encrypt,
     validate_nonce,
 )
 from p2p.discv5.messages import (
     BaseMessage,
+    MessageTypeRegistry,
+    default_message_type_registry,
 )
 from p2p.discv5.enr import (
     ENR,
@@ -112,6 +116,63 @@ class AuthHeaderPacket(NamedTuple):
             encrypted_message=encrypted_message,
         )
 
+    def decrypt_auth_response(self, auth_response_key: AES128Key) -> Tuple[bytes, Optional[ENR]]:
+        """Extract id nonce signature and optional ENR from auth header packet."""
+        plain_text = aesgcm_decrypt(
+            key=auth_response_key,
+            nonce=ZERO_NONCE,
+            cipher_text=self.auth_header.encrypted_auth_response,
+            authenticated_data=self.tag,
+        )
+
+        try:
+            decoded_rlp = rlp.decode(plain_text)
+        except DecodingError as error:
+            raise ValidationError(
+                f"Auth response does not contain valid RLP: {encode_hex(plain_text)}"
+            )
+
+        if not is_list_like(decoded_rlp):
+            raise ValidationError(
+                f"Auth response contains bytes instead of list: {encode_hex(decoded_rlp)}"
+            )
+
+        if len(decoded_rlp) != 2:
+            raise ValidationError(
+                f"Auth response is a list of {len(decoded_rlp)} instead of two elements"
+            )
+        id_nonce_signature, serialized_enr = decoded_rlp
+
+        if not is_bytes(id_nonce_signature):
+            raise ValidationError(
+                f"Id nonce signature is a list instead of bytes: {id_nonce_signature}"
+            )
+
+        if not is_list_like(serialized_enr):
+            raise ValidationError(f"ENR is bytes instead of list: {encode_hex(serialized_enr)}")
+
+        if len(serialized_enr) == 0:
+            enr = None
+        else:
+            try:
+                enr = ENR.deserialize(serialized_enr)
+            except DeserializationError as error:
+                raise ValidationError("ENR in auth response is not properly encoded") from error
+
+        return id_nonce_signature, enr
+
+    def decrypt_message(self,
+                        initiator_key: AES128Key,
+                        message_type_registry: MessageTypeRegistry = default_message_type_registry,
+                        ) -> BaseMessage:
+        return _decrypt_message(
+            initiator_key=initiator_key,
+            auth_tag=self.auth_header.auth_tag,
+            encrypted_message=self.encrypted_message,
+            authenticated_data=self.tag + rlp.encode(self.auth_header),
+            message_type_registry=message_type_registry,
+        )
+
     def to_wire_bytes(self) -> bytes:
         encoded_packet = b"".join((
             self.tag,
@@ -158,6 +219,18 @@ class AuthTagPacket(NamedTuple):
             tag=tag,
             auth_tag=auth_tag,
             encrypted_message=random_data,
+        )
+
+    def decrypt_message(self,
+                        initiator_key: AES128Key,
+                        message_type_registry: MessageTypeRegistry = default_message_type_registry,
+                        ) -> BaseMessage:
+        return _decrypt_message(
+            initiator_key=initiator_key,
+            auth_tag=self.auth_tag,
+            encrypted_message=self.encrypted_message,
+            authenticated_data=self.tag,
+            message_type_registry=message_type_registry,
         )
 
     def to_wire_bytes(self) -> bytes:
@@ -401,3 +474,37 @@ def compute_encrypted_message(initiator_key: AES128Key,
 def compute_who_are_you_magic(destination_node_id: Hash32) -> Hash32:
     preimage = destination_node_id + WHO_ARE_YOU_MAGIC_SUFFIX
     return Hash32(hashlib.sha256(preimage).digest())
+
+
+#
+# Packet decryption
+#
+def _decrypt_message(initiator_key: AES128Key,
+                     auth_tag: Nonce,
+                     encrypted_message: bytes,
+                     authenticated_data: bytes,
+                     message_type_registry: MessageTypeRegistry,
+                     ) -> BaseMessage:
+    plain_text = aesgcm_decrypt(
+        key=initiator_key,
+        nonce=auth_tag,
+        cipher_text=encrypted_message,
+        authenticated_data=authenticated_data,
+    )
+
+    try:
+        message_type = plain_text[0]
+    except IndexError:
+        raise ValidationError("Decrypted message is empty")
+
+    try:
+        message_class = message_type_registry[message_type]
+    except KeyError:
+        raise ValidationError(f"Unknown message type {message_type}")
+
+    try:
+        message = rlp.decode(plain_text[1:], message_class)
+    except DecodingError as error:
+        raise ValidationError("Encrypted message does not contain valid RLP") from error
+
+    return message

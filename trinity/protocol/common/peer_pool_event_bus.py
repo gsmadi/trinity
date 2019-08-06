@@ -13,40 +13,24 @@ from typing import (
     Type,
     TypeVar,
 )
-from cancel_token import (
-    CancelToken,
-)
+from cancel_token import CancelToken
 
 from lahja import (
     BaseEvent,
     BaseRequestResponseEvent,
     BroadcastConfig,
+    EndpointAPI,
 )
 
-from p2p.exceptions import (
-    PeerConnectionLost,
-)
-from p2p.kademlia import (
-    Node,
-)
+from p2p.abc import CommandAPI, NodeAPI
+from p2p.exceptions import PeerConnectionLost
 from p2p.peer import (
     BasePeer,
     PeerSubscriber,
 )
-from p2p.peer_pool import (
-    BasePeerPool,
-)
-from p2p.protocol import (
-    Command,
-    PayloadType,
-)
-from p2p.service import (
-    BaseService,
-)
-
-from trinity.endpoint import (
-    TrinityEventBusEndpoint,
-)
+from p2p.peer_pool import BasePeerPool
+from p2p.service import BaseService
+from p2p.typing import Payload
 
 from .events import (
     ConnectToNodeCommand,
@@ -58,9 +42,7 @@ from .events import (
     PeerJoinedEvent,
     PeerLeftEvent,
 )
-from .peer import (
-    BaseProxyPeer,
-)
+from .peer import BaseProxyPeer
 
 
 TPeer = TypeVar('TPeer', bound=BasePeer)
@@ -81,10 +63,10 @@ class PeerPoolEventServer(BaseService, PeerSubscriber, Generic[TPeer]):
 
     msg_queue_maxsize: int = 2000
 
-    subscription_msg_types: FrozenSet[Type[Command]] = frozenset({})
+    subscription_msg_types: FrozenSet[Type[CommandAPI]] = frozenset({})
 
     def __init__(self,
-                 event_bus: TrinityEventBusEndpoint,
+                 event_bus: EndpointAPI,
                  peer_pool: BasePeerPool,
                  token: CancelToken = None) -> None:
         super().__init__(token)
@@ -128,9 +110,9 @@ class PeerPoolEventServer(BaseService, PeerSubscriber, Generic[TPeer]):
 
     @abstractmethod
     async def handle_native_peer_message(self,
-                                         remote: Node,
-                                         cmd: Command,
-                                         msg: PayloadType) -> None:
+                                         remote: NodeAPI,
+                                         cmd: CommandAPI,
+                                         msg: Payload) -> None:
         """
         Process every native peer message. Subclasses should overwrite this to forward specific
         peer messages on the event bus. The handler is called for every message that is defined in
@@ -138,7 +120,7 @@ class PeerPoolEventServer(BaseService, PeerSubscriber, Generic[TPeer]):
         """
         pass
 
-    def get_peer(self, remote: Node) -> TPeer:
+    def get_peer(self, remote: NodeAPI) -> TPeer:
         """
         Look up and return a peer from the ``PeerPool`` that matches the given node.
         Raise ``PeerConnectionLost`` if the peer is no longer in the pool or is winding down.
@@ -205,7 +187,7 @@ class PeerPoolEventServer(BaseService, PeerSubscriber, Generic[TPeer]):
                     event.broadcast_config()
                 )
 
-    async def try_with_node(self, remote: Node, fn: Callable[[TPeer], Any]) -> None:
+    async def try_with_node(self, remote: NodeAPI, fn: Callable[[TPeer], Any]) -> None:
         try:
             peer = self.get_peer(remote)
         except PeerConnectionLost:
@@ -214,7 +196,7 @@ class PeerPoolEventServer(BaseService, PeerSubscriber, Generic[TPeer]):
             fn(peer)
 
     async def with_node_and_timeout(self,
-                                    remote: Node,
+                                    remote: NodeAPI,
                                     timeout: float,
                                     fn: Callable[[TPeer], Any]) -> Any:
         peer = self.get_peer(remote)
@@ -238,9 +220,9 @@ class PeerPoolEventServer(BaseService, PeerSubscriber, Generic[TPeer]):
 class DefaultPeerPoolEventServer(PeerPoolEventServer[BasePeer]):
 
     async def handle_native_peer_message(self,
-                                         remote: Node,
-                                         cmd: Command,
-                                         msg: PayloadType) -> None:
+                                         remote: NodeAPI,
+                                         cmd: CommandAPI,
+                                         msg: Payload) -> None:
         pass
 
 
@@ -255,13 +237,13 @@ class BaseProxyPeerPool(BaseService, Generic[TProxyPeer]):
     """
 
     def __init__(self,
-                 event_bus: TrinityEventBusEndpoint,
+                 event_bus: EndpointAPI,
                  broadcast_config: BroadcastConfig,
                  token: CancelToken=None):
         super().__init__(token)
         self.event_bus = event_bus
         self.broadcast_config = broadcast_config
-        self.connected_peers: Dict[Node, TProxyPeer] = dict()
+        self.connected_peers: Dict[NodeAPI, TProxyPeer] = dict()
 
     async def stream_existing_and_joining_peers(self) -> AsyncIterator[TProxyPeer]:
         for proxy_peer in await self.get_peers():
@@ -313,12 +295,12 @@ class BaseProxyPeerPool(BaseService, Generic[TProxyPeer]):
 
     @abstractmethod
     def convert_node_to_proxy_peer(self,
-                                   remote: Node,
-                                   event_bus: TrinityEventBusEndpoint,
+                                   remote: NodeAPI,
+                                   event_bus: EndpointAPI,
                                    broadcast_config: BroadcastConfig) -> TProxyPeer:
         pass
 
-    async def ensure_proxy_peer(self, remote: Node) -> TProxyPeer:
+    async def ensure_proxy_peer(self, remote: NodeAPI) -> TProxyPeer:
 
         if remote not in self.connected_peers:
             proxy_peer = self.convert_node_to_proxy_peer(

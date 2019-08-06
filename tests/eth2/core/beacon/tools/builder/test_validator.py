@@ -5,11 +5,22 @@ from hypothesis import (
     strategies as st,
 )
 
+from eth_utils import (
+    ValidationError,
+)
+
 from eth2._utils.bls import bls
+from eth2._utils.bls.backends.chia import (
+    ChiaBackend,
+)
 from eth2._utils.bitfield import (
     get_empty_bitfield,
     has_voted,
 )
+from eth2.beacon.helpers import (
+    compute_domain,
+)
+from eth2.beacon.signature_domain import SignatureDomain
 from eth2.beacon.tools.builder.validator import (
     aggregate_votes,
     verify_votes,
@@ -19,8 +30,7 @@ from eth2.beacon.tools.builder.validator import (
 @pytest.mark.slow
 @settings(
     max_examples=1,
-    # Last CI run took >10 seconds. Allow up to 15s.
-    deadline=15000,
+    deadline=None,
 )
 @given(random=st.randoms())
 @pytest.mark.parametrize(
@@ -36,7 +46,9 @@ def test_aggregate_votes(votes_count, random, privkeys, pubkeys):
     bit_count = 10
     pre_bitfield = get_empty_bitfield(bit_count)
     pre_sigs = ()
-    domain = 0
+    domain = compute_domain(
+        SignatureDomain.DOMAIN_ATTESTATION,
+    )
 
     random_votes = random.sample(range(bit_count), votes_count)
     message_hash = b'\x12' * 32
@@ -76,9 +88,8 @@ def test_aggregate_votes(votes_count, random, privkeys, pubkeys):
 
     aggregated_pubs = bls.aggregate_pubkeys(pubs)
 
-    if votes_count != 0:
-        bls.validate(message_hash, aggregated_pubs, sigs, domain)
-    else:
-        # EMPTY_SIGNATURE is considered invalid
-        with pytest.raises(ValueError):
+    if votes_count == 0 and bls.backend == ChiaBackend:
+        with pytest.raises(ValidationError):
             bls.validate(message_hash, aggregated_pubs, sigs, domain)
+    else:
+        bls.validate(message_hash, aggregated_pubs, sigs, domain)

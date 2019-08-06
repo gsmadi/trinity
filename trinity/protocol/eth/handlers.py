@@ -15,12 +15,10 @@ from eth_typing import (
     Hash32,
 )
 from lahja import (
-    AsyncioEndpoint,
     BroadcastConfig,
+    EndpointAPI,
 )
-from p2p.kademlia import (
-    Node,
-)
+from p2p.abc import NodeAPI
 
 from trinity.protocol.common.handlers import (
     BaseChainExchangeHandler,
@@ -29,6 +27,9 @@ from trinity.protocol.common.types import (
     BlockBodyBundles,
     NodeDataBundles,
     ReceiptsBundles,
+)
+from trinity._utils.errors import (
+    SupportsError,
 )
 
 from .events import (
@@ -66,8 +67,8 @@ class ProxyETHExchangeHandler:
     """
 
     def __init__(self,
-                 remote: Node,
-                 event_bus: AsyncioEndpoint,
+                 remote: NodeAPI,
+                 event_bus: EndpointAPI,
                  broadcast_config: BroadcastConfig):
         self.remote = remote
         self._event_bus = event_bus
@@ -77,12 +78,12 @@ class ProxyETHExchangeHandler:
             logging.getLogger('trinity.protocol.eth.handlers.ProxyETHExchangeHandler')
         )
 
-    def raise_if_needed(self, exception: Exception) -> None:
-        if exception is not None:
+    def raise_if_needed(self, value: SupportsError) -> None:
+        if value.error is not None:
             self.logger.warning(
-                "Raised %s while fetching from peer %s", exception, self.remote.uri
+                "Raised %s while fetching from peer %s", value.error, self.remote.uri
             )
-            raise exception
+            raise value.error
 
     async def get_block_headers(self,
                                 block_number_or_hash: BlockIdentifier,
@@ -103,7 +104,7 @@ class ProxyETHExchangeHandler:
             self._broadcast_config
         )
 
-        self.raise_if_needed(response.exception)
+        self.raise_if_needed(response)
 
         self.logger.debug2(
             "ProxyETHExchangeHandler returning %s block headers from %s",
@@ -126,7 +127,7 @@ class ProxyETHExchangeHandler:
             self._broadcast_config
         )
 
-        self.raise_if_needed(response.exception)
+        self.raise_if_needed(response)
 
         self.logger.debug2(
             "ProxyETHExchangeHandler returning %s block bodies from %s",
@@ -149,7 +150,7 @@ class ProxyETHExchangeHandler:
             self._broadcast_config
         )
 
-        self.raise_if_needed(response.exception)
+        self.raise_if_needed(response)
 
         self.logger.debug2(
             "ProxyETHExchangeHandler returning %s node bundles from %s",
@@ -172,7 +173,7 @@ class ProxyETHExchangeHandler:
             self._broadcast_config
         )
 
-        self.raise_if_needed(response.exception)
+        self.raise_if_needed(response)
 
         self.logger.debug2(
             "ProxyETHExchangeHandler returning %s receipt bundles from %s",
