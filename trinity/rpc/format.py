@@ -12,43 +12,47 @@ from eth_utils.toolz import (
 )
 
 from eth_utils import (
+    apply_formatter_if,
     apply_formatters_to_dict,
     decode_hex,
     encode_hex,
     int_to_big_endian,
+    is_address,
+    to_checksum_address,
 )
 
 import rlp
 
+from eth.abc import (
+    BlockAPI,
+    BlockHeaderAPI,
+    SignedTransactionAPI,
+)
 from eth.constants import (
     CREATE_CONTRACT_ADDRESS,
 )
-from eth.rlp.blocks import (
-    BaseBlock
-)
-from eth.rlp.headers import (
-    BlockHeader
-)
-from eth.rlp.transactions import (
-    BaseTransaction
-)
 
-from trinity.chains.base import BaseAsyncChain
+from trinity.chains.base import AsyncChainAPI
 
 
-def transaction_to_dict(transaction: BaseTransaction) -> Dict[str, str]:
-    return dict(
-        hash=encode_hex(transaction.hash),
-        nonce=hex(transaction.nonce),
-        gas=hex(transaction.gas),
-        gasPrice=hex(transaction.gas_price),
-        to=encode_hex(transaction.to),
-        value=hex(transaction.value),
-        input=encode_hex(transaction.data),
-        r=hex(transaction.r),
-        s=hex(transaction.s),
-        v=hex(transaction.v),
-    )
+def transaction_to_dict(transaction: SignedTransactionAPI) -> Dict[str, str]:
+    return {
+        'hash': encode_hex(transaction.hash),
+        'nonce': hex(transaction.nonce),
+        'gas': hex(transaction.gas),
+        'gasPrice': hex(transaction.gas_price),
+        'from': to_checksum_address(transaction.sender),
+        'to': apply_formatter_if(
+            is_address,
+            to_checksum_address,
+            encode_hex(transaction.to)
+        ),
+        'value': hex(transaction.value),
+        'input': encode_hex(transaction.data),
+        'r': hex(transaction.r),
+        's': hex(transaction.s),
+        'v': hex(transaction.v),
+    }
 
 
 hexstr_to_int = functools.partial(int, base=16)
@@ -76,7 +80,7 @@ def normalize_transaction_dict(transaction_dict: Dict[str, str]) -> Dict[str, An
     return merge(SAFE_TRANSACTION_DEFAULTS, normalized_dict)
 
 
-def header_to_dict(header: BlockHeader) -> Dict[str, str]:
+def header_to_dict(header: BlockHeaderAPI) -> Dict[str, str]:
     logs_bloom = encode_hex(int_to_big_endian(header.bloom))[2:]
     logs_bloom = '0x' + logs_bloom.rjust(512, '0')
     header_dict = {
@@ -100,8 +104,8 @@ def header_to_dict(header: BlockHeader) -> Dict[str, str]:
     return header_dict
 
 
-def block_to_dict(block: BaseBlock,
-                  chain: BaseAsyncChain,
+def block_to_dict(block: BlockAPI,
+                  chain: AsyncChainAPI,
                   include_transactions: bool) -> Dict[str, Union[str, List[str]]]:
 
     header_dict = header_to_dict(block.header)

@@ -6,13 +6,17 @@ import logging
 import time
 from typing import (
     Any,
+    AsyncIterator,
     Awaitable,
     Callable,
     List,
     Optional,
+    TypeVar,
     cast,
 )
 from weakref import WeakSet
+
+from async_generator import asynccontextmanager
 
 from cancel_token import CancelToken, OperationCancelled
 from eth_utils import (
@@ -50,7 +54,7 @@ class BaseService(ABC, CancellableMixin):
     _start_time: float = None
 
     def __init__(self,
-                 token: CancelToken=None,
+                 token: CancelToken = None,
                  loop: asyncio.AbstractEventLoop = None) -> None:
         self.events = ServiceEvents()
         self._run_lock = asyncio.Lock()
@@ -98,9 +102,13 @@ class BaseService(ABC, CancellableMixin):
         finished_callback (if one was passed).
         """
         if self.is_running:
-            raise ValidationError("Cannot start the service while it's already running")
+            raise ValidationError("Cannot start the service while it's already running: %s", self)
         elif self.is_cancelled:
-            raise ValidationError("Cannot restart a service that has already been cancelled")
+            raise ValidationError(
+                "Cannot restart a service that has already been cancelled: %s -> %s",
+                self,
+                self.cancel_token.triggered_token,
+            )
 
         if finished_callback:
             self._finished_callbacks.append(finished_callback)
@@ -314,6 +322,9 @@ class BaseService(ABC, CancellableMixin):
             if self._child_services:
                 self.logger.debug("Pending child services: %s", list(self._child_services))
             await self._forcibly_cancel_all_tasks()
+            # Sleep a bit because the Future.cancel() method just schedules the callbacks, so we
+            # need to give the event loop a chance to actually call them.
+            await asyncio.sleep(0.01)
         else:
             self.logger.debug("%s finished cleanly", self)
 
@@ -400,3 +411,25 @@ class EmptyService(BaseService):
 
     async def _cleanup(self) -> None:
         pass
+
+
+TService = TypeVar('TService', bound=BaseService)
+
+
+@asynccontextmanager
+async def run_service(service: TService) -> AsyncIterator[TService]:
+    task = asyncio.ensure_future(service.run())
+    await service.events.started.wait()
+    try:
+        yield service
+    finally:
+        try:
+            if not service.is_cancelled:
+                await service.cancel()
+        finally:
+            task.cancel()
+
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass

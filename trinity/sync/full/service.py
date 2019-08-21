@@ -4,12 +4,12 @@ import time
 from cancel_token import CancelToken
 
 from eth.constants import BLANK_ROOT_HASH
+from eth.db.backends.base import BaseAtomicDB
 from eth.rlp.headers import BlockHeader
 
 from p2p.service import BaseService
 
-from trinity.chains.base import BaseAsyncChain
-from trinity.db.base import BaseAsyncDB
+from trinity.chains.base import AsyncChainAPI
 from trinity.db.eth1.chain import BaseAsyncChainDB
 from trinity.protocol.eth.peer import ETHPeerPool
 
@@ -20,9 +20,9 @@ from .state import StateDownloader
 
 async def ensure_state_then_sync_full(logger: logging.Logger,
                                       head: BlockHeader,
-                                      base_db: BaseAsyncDB,
+                                      base_db: BaseAtomicDB,
                                       chaindb: BaseAsyncChainDB,
-                                      chain: BaseAsyncChain,
+                                      chain: AsyncChainAPI,
                                       peer_pool: ETHPeerPool,
                                       cancel_token: CancelToken) -> None:
     # Ensure we have the state for our current head.
@@ -47,9 +47,9 @@ async def ensure_state_then_sync_full(logger: logging.Logger,
 class FullChainSyncer(BaseService):
 
     def __init__(self,
-                 chain: BaseAsyncChain,
+                 chain: AsyncChainAPI,
                  chaindb: BaseAsyncChainDB,
-                 base_db: BaseAsyncDB,
+                 base_db: BaseAtomicDB,
                  peer_pool: ETHPeerPool,
                  token: CancelToken = None) -> None:
         super().__init__(token)
@@ -78,9 +78,9 @@ class FullChainSyncer(BaseService):
 class FastThenFullChainSyncer(BaseService):
 
     def __init__(self,
-                 chain: BaseAsyncChain,
+                 chain: AsyncChainAPI,
                  chaindb: BaseAsyncChainDB,
-                 base_db: BaseAsyncDB,
+                 base_db: BaseAtomicDB,
                  peer_pool: ETHPeerPool,
                  token: CancelToken = None) -> None:
         super().__init__(token)
@@ -131,67 +131,3 @@ class FastThenFullChainSyncer(BaseService):
             self.peer_pool,
             self.cancel_token
         )
-
-
-def _test() -> None:
-    import argparse
-    import asyncio
-    import signal
-    from eth.chains.ropsten import ROPSTEN_VM_CONFIGURATION
-    from eth.db.backends.level import LevelDB
-    from p2p import ecies
-    from p2p.kademlia import Node
-    from trinity.constants import DEFAULT_PREFERRED_NODES, ROPSTEN_NETWORK_ID
-    from trinity.protocol.common.context import ChainContext
-    from tests.core.integration_test_helpers import (
-        FakeAsyncChainDB, FakeAsyncRopstenChain, connect_to_peers_loop)
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-db', type=str, required=True)
-    parser.add_argument('-enode', type=str, required=False, help="The enode we should connect to")
-    args = parser.parse_args()
-
-    chaindb = FakeAsyncChainDB(LevelDB(args.db))
-    chain = FakeAsyncRopstenChain(chaindb)
-    network_id = ROPSTEN_NETWORK_ID
-    privkey = ecies.generate_privkey()
-
-    context = ChainContext(
-        headerdb=chaindb,
-        network_id=network_id,
-        vm_configuration=ROPSTEN_VM_CONFIGURATION,
-        client_version_string='test',
-        listen_port=30303,
-    )
-    peer_pool = ETHPeerPool(privkey=privkey, context=context)
-    if args.enode:
-        nodes = tuple([Node.from_uri(args.enode)])
-    else:
-        nodes = DEFAULT_PREFERRED_NODES[network_id]
-    asyncio.ensure_future(peer_pool.run())
-    peer_pool.run_task(connect_to_peers_loop(peer_pool, nodes))
-
-    loop = asyncio.get_event_loop()
-
-    syncer = FastThenFullChainSyncer(chain, chaindb, chaindb.db, peer_pool)
-
-    sigint_received = asyncio.Event()
-    for sig in [signal.SIGINT, signal.SIGTERM]:
-        loop.add_signal_handler(sig, sigint_received.set)
-
-    async def exit_on_sigint() -> None:
-        await sigint_received.wait()
-        await syncer.cancel()
-        await peer_pool.cancel()
-        loop.stop()
-
-    loop.set_debug(True)
-    asyncio.ensure_future(exit_on_sigint())
-    asyncio.ensure_future(syncer.run())
-    loop.run_forever()
-    loop.close()
-
-
-if __name__ == "__main__":
-    _test()

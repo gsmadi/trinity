@@ -1,26 +1,16 @@
 import asyncio
 import pytest
 
-from trinity.protocol.les.peer import (
-    LESPeer,
-)
 from trinity.protocol.les.proto import (
     LESProtocol,
 )
-
-from tests.core.peer_helpers import (
-    get_directly_linked_peers,
-)
+from trinity.tools.factories import LESV2PeerPairFactory
 
 
 @pytest.fixture
 async def les_peer_and_remote(request, event_loop):
-    peer, remote = await get_directly_linked_peers(
-        request,
-        event_loop,
-        alice_peer_class=LESPeer,
-    )
-    return peer, remote
+    async with LESV2PeerPairFactory() as (alice, bob):
+        yield alice, bob
 
 
 @pytest.mark.parametrize(
@@ -48,7 +38,14 @@ async def test_les_protocol_methods_request_id(
         generated_request_id = peer.sub_proto.send_get_block_headers(
             b'1234', 1, 0, False, request_id=request_id
         )
-        await asyncio.sleep(0.1)
+
+        # yield to let remote and peer transmit messages.  This can take a
+        # small amount of time so we give it a few rounds of the event loop to
+        # finish transmitting.
+        for _ in range(10):
+            await asyncio.sleep(0.01)
+            if buffer.msg_queue.qsize() >= 1:
+                break
 
     messages = buffer.get_messages()
     assert len(messages) == 1

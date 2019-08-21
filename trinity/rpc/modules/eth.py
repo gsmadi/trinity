@@ -27,26 +27,24 @@ from eth_utils import (
     to_wei,
 )
 
+from eth.abc import AccountDatabaseAPI
 from eth.constants import (
     ZERO_ADDRESS,
 )
 from eth.rlp.blocks import (
-    BaseBlock
+    BaseBlock,
 )
 from eth.rlp.headers import (
-    BlockHeader
+    BlockHeader,
 )
 from eth.vm.spoof import (
     SpoofTransaction,
-)
-from eth.vm.state import (
-    BaseAccountDB
 )
 
 from trinity.constants import (
     TO_NETWORKING_BROADCAST_CONFIG,
 )
-from trinity.chains.base import BaseAsyncChain
+from trinity.chains.base import AsyncChainAPI
 from trinity.rpc.format import (
     block_to_dict,
     header_to_dict,
@@ -58,6 +56,7 @@ from trinity.rpc.format import (
 from trinity.rpc.modules import (
     Eth1ChainRPCModule,
 )
+from trinity.rpc.retry import retryable
 from trinity.sync.common.events import (
     SyncingRequest,
 )
@@ -67,7 +66,7 @@ from trinity._utils.validation import (
 )
 
 
-async def get_header(chain: BaseAsyncChain, at_block: Union[str, int]) -> BlockHeader:
+async def get_header(chain: AsyncChainAPI, at_block: Union[str, int]) -> BlockHeader:
     if at_block == 'pending':
         raise NotImplementedError("RPC interface does not support the 'pending' block at this time")
     elif at_block == 'latest':
@@ -79,7 +78,7 @@ async def get_header(chain: BaseAsyncChain, at_block: Union[str, int]) -> BlockH
     # mypy doesn't have user defined type guards yet
     # https://github.com/python/mypy/issues/5206
     elif is_integer(at_block) and at_block >= 0:  # type: ignore
-        block = await chain.coro_get_canonical_block_by_number(BlockNumber(0))
+        block = await chain.coro_get_canonical_block_by_number(BlockNumber(int(at_block)))
         at_header = block.header
     else:
         raise TypeError("Unrecognized block reference: %r" % at_block)
@@ -88,15 +87,15 @@ async def get_header(chain: BaseAsyncChain, at_block: Union[str, int]) -> BlockH
 
 
 async def state_at_block(
-        chain: BaseAsyncChain,
+        chain: AsyncChainAPI,
         at_block: Union[str, int],
-        read_only: bool=True) ->BaseAccountDB:
+        read_only: bool=True) -> AccountDatabaseAPI:
     at_header = await get_header(chain, at_block)
     vm = chain.get_vm(at_header)
     return vm.state
 
 
-async def get_block_at_number(chain: BaseAsyncChain, at_block: Union[str, int]) -> BaseBlock:
+async def get_block_at_number(chain: AsyncChainAPI, at_block: Union[str, int]) -> BaseBlock:
     # mypy doesn't have user defined type guards yet
     # https://github.com/python/mypy/issues/5206
     if is_integer(at_block) and at_block >= 0:  # type: ignore
@@ -108,7 +107,7 @@ async def get_block_at_number(chain: BaseAsyncChain, at_block: Union[str, int]) 
 
 
 def dict_to_spoof_transaction(
-        chain: BaseAsyncChain,
+        chain: AsyncChainAPI,
         header: BlockHeader,
         transaction_dict: Dict[str, Any]) -> SpoofTransaction:
     """
@@ -176,6 +175,7 @@ class Eth(Eth1ChainRPCModule):
     async def gasPrice(self) -> str:
         return hex(int(os.environ.get('TRINITY_GAS_PRICE', to_wei(1, 'gwei'))))
 
+    @retryable
     @format_params(decode_hex, to_int_if_hex)
     async def getBalance(self, address: Address, at_block: Union[str, int]) -> str:
         state = await state_at_block(self.chain, at_block)
@@ -207,12 +207,14 @@ class Eth(Eth1ChainRPCModule):
         block = await get_block_at_number(self.chain, at_block)
         return hex(len(block.transactions))
 
+    @retryable
     @format_params(decode_hex, to_int_if_hex)
     async def getCode(self, address: Address, at_block: Union[str, int]) -> str:
         state = await state_at_block(self.chain, at_block)
         code = state.get_code(address)
         return encode_hex(code)
 
+    @retryable
     @format_params(decode_hex, to_int_if_hex, to_int_if_hex)
     async def getStorageAt(self, address: Address, position: int, at_block: Union[str, int]) -> str:
         if not is_integer(position) or position < 0:

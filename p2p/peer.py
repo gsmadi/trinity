@@ -23,6 +23,7 @@ from cached_property import cached_property
 
 from eth_utils import (
     to_tuple,
+    ValidationError,
 )
 
 from eth_keys import datatypes
@@ -34,10 +35,16 @@ from p2p._utils import (
     trim_middle,
 )
 from p2p.abc import CommandAPI, MultiplexerAPI, NodeAPI, ProtocolAPI, TransportAPI
+from p2p.constants import (
+    BLACKLIST_SECONDS_BAD_PROTOCOL,
+    DEVP2P_V4,
+    DEVP2P_V5,
+)
 from p2p.disconnect import DisconnectReason
 from p2p.exceptions import (
     HandshakeFailure,
     MalformedMessage,
+    PeerConnectionLost,
     TooManyPeersFailure,
     UnexpectedMessage,
     UnknownProtocolCommand,
@@ -45,9 +52,11 @@ from p2p.exceptions import (
 from p2p.multiplexer import Multiplexer
 from p2p.service import BaseService
 from p2p.p2p_proto import (
+    BaseP2PProtocol,
     Disconnect,
     Hello,
     P2PProtocol,
+    P2PProtocolV4,
     Ping,
     Pong,
 )
@@ -63,10 +72,6 @@ from p2p.tracking.connection import (
     NoopConnectionTracker,
 )
 
-from .constants import (
-    BLACKLIST_SECONDS_BAD_PROTOCOL,
-    SNAPPY_PROTOCOL_VERSION,
-)
 
 if TYPE_CHECKING:
     from p2p.peer_pool import BasePeerPool  # noqa: F401
@@ -138,7 +143,7 @@ class BasePeerBootManager(BaseService):
     protocols which need to perform more complex boot check.
     """
     def __init__(self, peer: 'BasePeer') -> None:
-        super().__init__(peer.cancel_token)
+        super().__init__(token=peer.cancel_token, loop=peer.cancel_token.loop)
         self.peer = peer
 
     async def _run(self) -> None:
@@ -148,10 +153,15 @@ class BasePeerBootManager(BaseService):
 class BasePeerContext:
     client_version_string: str
     listen_port: int
+    p2p_version: int
 
-    def __init__(self, client_version_string: str, listen_port: int) -> None:
+    def __init__(self,
+                 client_version_string: str,
+                 listen_port: int,
+                 p2p_version: int) -> None:
         self.client_version_string = client_version_string
         self.listen_port = listen_port
+        self.p2p_version = p2p_version
 
 
 class BasePeer(BaseService):
@@ -165,6 +175,8 @@ class BasePeer(BaseService):
     disconnect_reason: DisconnectReason = None
 
     _event_bus: EndpointAPI = None
+
+    base_protocol: BaseP2PProtocol
 
     def __init__(self,
                  transport: TransportAPI,
@@ -186,10 +198,20 @@ class BasePeer(BaseService):
 
         # Initially while doing the handshake, the base protocol shouldn't support
         # snappy compression
-        self.base_protocol = P2PProtocol(
-            transport=self.transport,
-            snappy_support=False,
-        )
+        if self.context.p2p_version == DEVP2P_V5:
+            self.base_protocol = P2PProtocol(
+                transport=self.transport,
+                cmd_id_offset=0,
+                snappy_support=False,
+            )
+        elif self.context.p2p_version == DEVP2P_V4:
+            self.base_protocol = P2PProtocolV4(
+                transport=self.transport,
+                cmd_id_offset=0,
+                snappy_support=False,
+            )
+        else:
+            raise ValidationError(f"Unrecognized p2p version: {self.context.p2p_version}")
 
         # Optional event bus handle
         self._event_bus = event_bus
@@ -254,12 +276,12 @@ class BasePeer(BaseService):
 
     @abstractmethod
     async def send_sub_proto_handshake(self) -> None:
-        pass
+        ...
 
     @abstractmethod
     async def process_sub_proto_handshake(
             self, cmd: CommandAPI, msg: Payload) -> None:
-        pass
+        ...
 
     @contextlib.contextmanager
     def collect_sub_proto_messages(self) -> Iterator['MsgBuffer']:
@@ -322,6 +344,7 @@ class BasePeer(BaseService):
             client_version_string=self.context.client_version_string,
             capabilities=self.capabilities,
             listen_port=self.context.listen_port,
+            p2p_version=self.context.p2p_version,
         )
 
         cmd, msg = await self.read_msg()
@@ -365,10 +388,21 @@ class BasePeer(BaseService):
             token=self.cancel_token,
         )
         self.run_child_service(self.boot_manager)
-        async with multiplexer.multiplex():
-            self.run_daemon_task(self.handle_p2p_proto_stream(multiplexer))
-            self.run_daemon_task(self.handle_sub_proto_stream(multiplexer))
-            await self.cancellation()
+        try:
+            async with multiplexer.multiplex():
+                self.run_daemon_task(self.handle_p2p_proto_stream(multiplexer))
+                self.run_daemon_task(self.handle_sub_proto_stream(multiplexer))
+                await self.cancellation()
+        except PeerConnectionLost as err:
+            self.logger.debug('Peer connection lost: %s: %r', self, err)
+            self.cancel_nowait()
+        except MalformedMessage as err:
+            self.logger.debug('MalformedMessage error with peer: %s: %r', self, err)
+            await self.disconnect(DisconnectReason.subprotocol_error)
+        except TimeoutError as err:
+            # TODO: we should send a ping and see if we get back a pong...
+            self.logger.debug('TimeoutError error with peer: %s: %r', self, err)
+            await self.disconnect(DisconnectReason.timeout)
 
     async def read_msg(self) -> Tuple[CommandAPI, Payload]:
         msg = await self.transport.recv(self.cancel_token)
@@ -460,16 +494,17 @@ class BasePeer(BaseService):
 
         # Check whether to support Snappy Compression or not
         # based on other peer's p2p protocol version
-        snappy_support = msg['version'] >= SNAPPY_PROTOCOL_VERSION
+        snappy_support = msg['version'] >= DEVP2P_V5
 
         if snappy_support:
             # Now update the base protocol to support snappy compression
             # This is needed so that Trinity is compatible with parity since
             # parity sends Ping immediately after Handshake
-                self.base_protocol = P2PProtocol(
-                    self.transport,
-                    snappy_support=snappy_support,
-                )
+            self.base_protocol = P2PProtocol(
+                self.transport,
+                cmd_id_offset=0,
+                snappy_support=snappy_support,
+            )
 
         remote_capabilities = msg['capabilities']
         matched_proto_classes = match_protocols_with_capabilities(
@@ -564,7 +599,7 @@ class PeerSubscriber(ABC):
         commands are handled exclusively at the peer level and cannot be
         consumed with this API.
         """
-        pass
+        ...
 
     @functools.lru_cache(maxsize=64)
     def is_subscription_command(self, cmd_type: Type[CommandAPI]) -> bool:
@@ -579,7 +614,7 @@ class PeerSubscriber(ABC):
         The max size of messages the underlying :meth:`msg_queue` can keep before it starts
         discarding new messages. Implementers need to overwrite this to specify the maximum size.
         """
-        pass
+        ...
 
     def register_peer(self, peer: BasePeer) -> None:
         """
@@ -699,7 +734,7 @@ class BasePeerFactory(ABC):
     @property
     @abstractmethod
     def peer_class(self) -> Type[BasePeer]:
-        pass
+        ...
 
     def __init__(self,
                  privkey: datatypes.PrivateKey,

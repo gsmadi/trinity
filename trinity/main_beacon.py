@@ -11,8 +11,8 @@ from typing import (
     Type,
 )
 
-from eth.db.backends.base import (
-    BaseDB,
+from eth.abc import (
+    AtomicDatabaseAPI,
 )
 from eth.db.backends.level import (
     LevelDB,
@@ -28,9 +28,7 @@ from trinity.config import (
 from trinity.constants import (
     APP_IDENTIFIER_BEACON,
 )
-from trinity.db.beacon.manager import (
-    create_db_server_manager,
-)
+from trinity.db.manager import DBManager
 from trinity.initialization import (
     ensure_beacon_dirs,
 )
@@ -49,9 +47,6 @@ from trinity._utils.mp import (
 )
 from trinity._utils.profiling import (
     setup_cprofiler,
-)
-from trinity._utils.proxy import (
-    serve_until_sigint,
 )
 
 
@@ -101,13 +96,17 @@ def trinity_boot(args: Namespace,
     return (database_server_process,)
 
 
-@setup_cprofiler('run_database_process')
+@setup_cprofiler('profile_db_process')
 @with_queued_logging
-def run_database_process(trinity_config: TrinityConfig, db_class: Type[BaseDB]) -> None:
+def run_database_process(trinity_config: TrinityConfig, db_class: Type[AtomicDatabaseAPI]) -> None:
     with trinity_config.process_id_file('database'):
         app_config = trinity_config.get_app_config(BeaconAppConfig)
 
         base_db = db_class(db_path=app_config.database_dir)
 
-        manager = create_db_server_manager(trinity_config, base_db)
-        serve_until_sigint(manager)
+        manager = DBManager(base_db)
+        with manager.run(trinity_config.database_ipc_path):
+            try:
+                manager.wait_stopped()
+            except KeyboardInterrupt:
+                pass

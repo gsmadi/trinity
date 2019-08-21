@@ -47,7 +47,7 @@ from p2p.exceptions import BaseP2PError, PeerConnectionLost
 from p2p.peer import BasePeer, PeerSubscriber
 from p2p.service import BaseService
 
-from trinity.chains.base import BaseAsyncChain
+from trinity.chains.base import AsyncChainAPI
 from trinity.db.eth1.header import BaseAsyncHeaderDB
 from trinity.protocol.common.commands import (
     BaseBlockHeaders,
@@ -84,7 +84,7 @@ class SkeletonSyncer(BaseService, Generic[TChainPeer]):
     _fetched_headers: 'asyncio.Queue[Tuple[BlockHeader, ...]]'
 
     def __init__(self,
-                 chain: BaseAsyncChain,
+                 chain: AsyncChainAPI,
                  db: BaseAsyncHeaderDB,
                  peer: TChainPeer,
                  token: CancelToken) -> None:
@@ -165,10 +165,10 @@ class SkeletonSyncer(BaseService, Generic[TChainPeer]):
             # validate that parents and children match
             pairs = tuple(zip(parents, children))
             try:
-                validate_pair_coros = [
+                validate_pair_coros = (
                     self.wait(self._chain.coro_validate_chain(parent, (child, )))
                     for parent, child in pairs
-                ]
+                )
                 await self.wait(asyncio.gather(*validate_pair_coros, loop=self.get_event_loop()))
             except ValidationError as e:
                 self.logger.warning(
@@ -266,7 +266,21 @@ class SkeletonSyncer(BaseService, Generic[TChainPeer]):
         Return True if the syncing of header appears to be complete.
         This is fairly relaxed about the definition, preferring speed over slow precision.
         """
-        return await self._db.coro_header_exists(header.hash)
+        if not await self._db.coro_header_exists(header.hash):
+            return False
+        else:
+            try:
+                # This is a somewhat slow mechanism, since it triggers an RLP encode on
+                #   the other side. Once AsyncHeaderDB can do a coro_exists(), check
+                #   the score directly, instead.
+                await self.wait(self._db.coro_get_score(header.hash))
+            except HeaderNotFound:
+                # The header rlp is saved, but a score isn't so it was just preloaded in the DB
+                return False
+            else:
+                # The RLP and score are available, so this seems to have been properly imported
+                # Skip it during sync
+                return True
 
     async def _find_launch_headers(self, peer: TChainPeer) -> Tuple[BlockHeader, ...]:
         """
@@ -446,6 +460,9 @@ class SkeletonSyncer(BaseService, Generic[TChainPeer]):
             ))
 
             self.logger.debug2('sync received new headers: %s', headers)
+        except PeerConnectionLost:
+            self.logger.debug("Lost connection to %s while retrieving headers, aborting sync", peer)
+            return tuple()
         except OperationCancelled:
             self.logger.info("Skeleteon sync with %s cancelled", peer)
             return tuple()
@@ -498,7 +515,7 @@ class HeaderSyncerAPI(ABC):
 
     @abstractmethod
     def get_target_header_hash(self) -> Hash32:
-        pass
+        ...
 
 
 class ManualHeaderSyncer(HeaderSyncerAPI):
@@ -547,7 +564,7 @@ class HeaderMeatSyncer(BaseService, PeerSubscriber, Generic[TChainPeer]):
 
     def __init__(
             self,
-            chain: BaseAsyncChain,
+            chain: AsyncChainAPI,
             peer_pool: BaseChainPeerPool,
             stitcher: HeaderStitcher,
             token: CancelToken) -> None:
@@ -763,7 +780,7 @@ class BaseHeaderChainSyncer(BaseService, HeaderSyncerAPI, Generic[TChainPeer]):
     _meat: HeaderMeatSyncer[TChainPeer]
 
     def __init__(self,
-                 chain: BaseAsyncChain,
+                 chain: AsyncChainAPI,
                  db: BaseAsyncHeaderDB,
                  peer_pool: BaseChainPeerPool,
                  token: CancelToken = None) -> None:
@@ -837,7 +854,7 @@ class BaseHeaderChainSyncer(BaseService, HeaderSyncerAPI, Generic[TChainPeer]):
     @property
     @abstractmethod
     def tip_monitor_class(self) -> Type[BaseChainTipMonitor]:
-        pass
+        ...
 
     async def _run(self) -> None:
         self.run_daemon(self._tip_monitor)
@@ -853,7 +870,7 @@ class BaseHeaderChainSyncer(BaseService, HeaderSyncerAPI, Generic[TChainPeer]):
             try:
                 await self._validate_peer_is_ahead(peer)
             except _PeerBehind:
-                self.logger.info("At or behind peer %s, skipping skeleton sync", peer)
+                self.logger.debug("At or behind peer %s, skipping skeleton sync", peer)
             else:
                 async with self._get_skeleton_syncer(peer) as syncer:
                     await self._full_skeleton_sync(syncer)
@@ -947,7 +964,7 @@ class BaseHeaderChainSyncer(BaseService, HeaderSyncerAPI, Generic[TChainPeer]):
         head = await self.wait(self._db.coro_get_canonical_head())
         head_td = await self.wait(self._db.coro_get_score(head.hash))
         if peer.head_td <= head_td:
-            self.logger.info(
+            self.logger.debug(
                 "Head TD (%d) announced by %s not higher than ours (%d), not syncing",
                 peer.head_td, peer, head_td)
             raise _PeerBehind(f"{peer} is behind us, not a valid target for sync")

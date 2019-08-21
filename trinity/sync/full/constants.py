@@ -22,4 +22,9 @@ BLOCK_QUEUE_SIZE_TARGET = 1000
 # This is specifically for blocks where execution happens locally.
 # So each block might have a pretty significant execution time, on
 #   the order of seconds.
-BLOCK_IMPORT_QUEUE_SIZE = 10
+# This is also used during Beam sync, to limit how many previews are emitted at once
+# If you increase the number too high, then your I/O latency can skyrocket,
+#   causing a massive slowdown.
+# Every block gets previewed, and a block only enters the queue if another block import
+#   is active. So a queue size of 3 means that up to 4 previews are happening at once.
+BLOCK_IMPORT_QUEUE_SIZE = 15

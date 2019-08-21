@@ -111,7 +111,7 @@ class ResponseCandidateStream(
                 try:
                     yield await self._get_payload(timeout_remaining)
                 except TimeoutError as err:
-                    tracker.record_timeout()
+                    tracker.record_timeout(total_timeout)
 
                     # If the peer has timeoud out too many times, desconnect
                     # and blacklist them
@@ -273,7 +273,7 @@ class ExchangeManager(Generic[TRequestPayload, TResponsePayload, TResult]):
             self._cancel_token,
         )
         self._peer.run_daemon(self._response_stream)
-        await self._response_stream.events.started.wait()
+        await self._peer.wait(self._response_stream.events.started.wait())
 
     @property
     def is_operational(self) -> bool:
@@ -345,7 +345,7 @@ class ExchangeManager(Generic[TRequestPayload, TResponsePayload, TResult]):
                 stream.complete_request()
                 return result
 
-        raise ValidationError("Manager is not pending a response, but no valid response received")
+        raise PeerConnectionLost(f"Response stream of {self._peer} was apparently closed")
 
     @property
     def service(self) -> BaseService:

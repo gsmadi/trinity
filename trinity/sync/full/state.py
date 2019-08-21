@@ -1,7 +1,5 @@
-import asyncio
 import collections
 import itertools
-import logging
 from pathlib import Path
 import tempfile
 import time
@@ -30,6 +28,7 @@ from eth_typing import (
 
 from cancel_token import CancelToken
 
+from eth.abc import AtomicDatabaseAPI
 from eth.constants import (
     BLANK_ROOT_HASH,
     EMPTY_SHA3,
@@ -47,7 +46,6 @@ from p2p.exceptions import (
 )
 from p2p.peer import BasePeer, PeerSubscriber
 
-from trinity.db.base import BaseAsyncDB
 from trinity.db.eth1.chain import BaseAsyncChainDB
 from trinity.exceptions import (
     AlreadyWaiting,
@@ -74,7 +72,7 @@ class StateDownloader(BaseService, PeerSubscriber):
 
     def __init__(self,
                  chaindb: BaseAsyncChainDB,
-                 account_db: BaseAsyncDB,
+                 account_db: AtomicDatabaseAPI,
                  root_hash: Hash32,
                  peer_pool: ETHPeerPool,
                  token: CancelToken = None) -> None:
@@ -329,83 +327,3 @@ class StateSync(HexaryTrieSync):
             await self.schedule(account.storage_root, parent, depth, leaf_callback=None)
         if account.code_hash != EMPTY_SHA3:
             await self.schedule(account.code_hash, parent, depth, leaf_callback=None, is_raw=True)
-
-
-def _test() -> None:
-    import argparse
-    import signal
-    from eth.chains.ropsten import ROPSTEN_VM_CONFIGURATION
-    from p2p import ecies
-    from p2p.kademlia import Node
-    from trinity.constants import DEFAULT_PREFERRED_NODES, ROPSTEN_NETWORK_ID
-    from trinity.protocol.common.context import ChainContext
-    from tests.core.integration_test_helpers import (
-        FakeAsyncChainDB, FakeAsyncLevelDB, connect_to_peers_loop)
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-db', type=str, required=True)
-    parser.add_argument('-debug', action="store_true")
-    parser.add_argument('-enode', type=str, required=False, help="The enode we should connect to")
-    args = parser.parse_args()
-
-    log_level = logging.INFO
-    if args.debug:
-        log_level = logging.DEBUG
-
-    db = FakeAsyncLevelDB(args.db)
-    chaindb = FakeAsyncChainDB(db)
-    network_id = ROPSTEN_NETWORK_ID
-    if args.enode:
-        nodes = tuple([Node.from_uri(args.enode)])
-    else:
-        nodes = DEFAULT_PREFERRED_NODES[network_id]
-
-    context = ChainContext(
-        headerdb=chaindb,
-        network_id=network_id,
-        vm_configuration=ROPSTEN_VM_CONFIGURATION,
-        client_version_string='test',
-        listen_port=30303,
-    )
-    peer_pool = ETHPeerPool(
-        privkey=ecies.generate_privkey(),
-        context=context,
-    )
-    asyncio.ensure_future(peer_pool.run())
-    peer_pool.run_task(connect_to_peers_loop(peer_pool, nodes))
-
-    head = chaindb.get_canonical_head()
-    downloader = StateDownloader(chaindb, db, head.state_root, peer_pool)
-    downloader.logger.setLevel(log_level)
-    loop = asyncio.get_event_loop()
-
-    sigint_received = asyncio.Event()
-    for sig in [signal.SIGINT, signal.SIGTERM]:
-        loop.add_signal_handler(sig, sigint_received.set)
-
-    async def exit_on_sigint() -> None:
-        await sigint_received.wait()
-        await peer_pool.cancel()
-        await downloader.cancel()
-        loop.stop()
-
-    async def run() -> None:
-        await downloader.run()
-        downloader.logger.info("run() finished, exiting")
-        sigint_received.set()
-
-    # loop.set_debug(True)
-    asyncio.ensure_future(exit_on_sigint())
-    asyncio.ensure_future(run())
-    loop.run_forever()
-    loop.close()
-
-
-if __name__ == "__main__":
-    # Use the snippet below to get profile stats and print the top 50 functions by cumulative time
-    # used.
-    # import cProfile, pstats  # noqa
-    # cProfile.run('_test()', 'stats')
-    # pstats.Stats('stats').strip_dirs().sort_stats('cumulative').print_stats(50)
-    _test()

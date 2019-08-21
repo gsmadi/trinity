@@ -1,6 +1,5 @@
 from abc import abstractmethod
 import asyncio
-import logging
 from typing import (
     cast,
     Generic,
@@ -14,28 +13,27 @@ from lahja import EndpointAPI
 from eth_keys import datatypes
 from cancel_token import CancelToken, OperationCancelled
 from eth_typing import BlockNumber
-from eth.vm.base import BaseVM
+
+from eth.abc import AtomicDatabaseAPI, VirtualMachineAPI
 
 from p2p.abc import NodeAPI
-from p2p.constants import DEFAULT_MAX_PEERS
+from p2p.constants import DEFAULT_MAX_PEERS, DEVP2P_V5
 from p2p.disconnect import DisconnectReason
 from p2p.exceptions import (
     HandshakeFailure,
     PeerConnectionLost,
 )
-from p2p.kademlia import Node
+from p2p.handshake import DevP2PHandshakeParams
 from p2p.peer import receive_handshake
 from p2p.service import BaseService
 
 from eth2.beacon.chains.base import BeaconChain
 
 from trinity._utils.version import construct_trinity_client_identifier
-from trinity.chains.base import BaseAsyncChain
+from trinity.chains.base import AsyncChainAPI
 from trinity.constants import DEFAULT_PREFERRED_NODES
-from trinity.db.base import BaseAsyncDB
 from trinity.db.eth1.chain import BaseAsyncChainDB
 from trinity.db.eth1.header import BaseAsyncHeaderDB
-from trinity.db.beacon.chain import BaseAsyncBeaconChainDB
 from trinity.protocol.common.context import ChainContext
 from trinity.protocol.common.peer import BasePeerPool
 from trinity.protocol.eth.peer import ETHPeerPool
@@ -50,7 +48,7 @@ DIAL_IN_OUT_RATIO = 0.75
 BOUND_IP = '0.0.0.0'
 
 TPeerPool = TypeVar('TPeerPool', bound=BasePeerPool)
-T_VM_CONFIGURATION = Tuple[Tuple[BlockNumber, Type[BaseVM]], ...]
+T_VM_CONFIGURATION = Tuple[Tuple[BlockNumber, Type[VirtualMachineAPI]], ...]
 
 
 class BaseServer(BaseService, Generic[TPeerPool]):
@@ -61,10 +59,10 @@ class BaseServer(BaseService, Generic[TPeerPool]):
     def __init__(self,
                  privkey: datatypes.PrivateKey,
                  port: int,
-                 chain: BaseAsyncChain,
+                 chain: AsyncChainAPI,
                  chaindb: BaseAsyncChainDB,
                  headerdb: BaseAsyncHeaderDB,
-                 base_db: BaseAsyncDB,
+                 base_db: AtomicDatabaseAPI,
                  network_id: int,
                  max_peers: int = DEFAULT_MAX_PEERS,
                  bootstrap_nodes: Sequence[NodeAPI] = None,
@@ -75,6 +73,13 @@ class BaseServer(BaseService, Generic[TPeerPool]):
         super().__init__(token)
         # cross process event bus
         self.event_bus = event_bus
+
+        # setup parameters for the base devp2p handshake.
+        self.p2p_handshake_params = DevP2PHandshakeParams(
+            client_version_string=construct_trinity_client_identifier(),
+            listen_port=port,
+            version=DEVP2P_V5,
+        )
 
         # chain information
         self.chain = chain
@@ -100,7 +105,7 @@ class BaseServer(BaseService, Generic[TPeerPool]):
 
     @abstractmethod
     def _make_peer_pool(self) -> TPeerPool:
-        pass
+        ...
 
     async def _start_tcp_listener(self) -> None:
         # TODO: Support IPv6 addresses as well.
@@ -194,8 +199,9 @@ class FullServer(BaseServer[ETHPeerPool]):
             headerdb=self.headerdb,
             network_id=self.network_id,
             vm_configuration=self.chain.vm_configuration,
-            client_version_string=construct_trinity_client_identifier(),
-            listen_port=self.port,
+            client_version_string=self.p2p_handshake_params.client_version_string,
+            listen_port=self.p2p_handshake_params.listen_port,
+            p2p_version=self.p2p_handshake_params.version,
         )
         return ETHPeerPool(
             privkey=self.privkey,
@@ -213,8 +219,9 @@ class LightServer(BaseServer[LESPeerPool]):
             headerdb=self.headerdb,
             network_id=self.network_id,
             vm_configuration=self.chain.vm_configuration,
-            client_version_string=construct_trinity_client_identifier(),
-            listen_port=self.port,
+            client_version_string=self.p2p_handshake_params.client_version_string,
+            listen_port=self.p2p_handshake_params.listen_port,
+            p2p_version=self.p2p_handshake_params.version,
         )
         return LESPeerPool(
             privkey=self.privkey,
@@ -230,10 +237,10 @@ class BCCServer(BaseServer[BCCPeerPool]):
     def __init__(self,
                  privkey: datatypes.PrivateKey,
                  port: int,
-                 chain: BaseAsyncChain,
+                 chain: AsyncChainAPI,
                  chaindb: BaseAsyncChainDB,
                  headerdb: BaseAsyncHeaderDB,
-                 base_db: BaseAsyncDB,
+                 base_db: AtomicDatabaseAPI,
                  network_id: int,
                  max_peers: int = DEFAULT_MAX_PEERS,
                  bootstrap_nodes: Sequence[NodeAPI] = None,
@@ -276,10 +283,11 @@ class BCCServer(BaseServer[BCCPeerPool]):
 
     def _make_peer_pool(self) -> BCCPeerPool:
         context = BeaconContext(
-            chain_db=cast(BaseAsyncBeaconChainDB, self.chaindb),
+            chain_db=self.chaindb,
             network_id=self.network_id,
-            client_version_string=construct_trinity_client_identifier(),
-            listen_port=self.port,
+            client_version_string=self.p2p_handshake_params.client_version_string,
+            listen_port=self.p2p_handshake_params.listen_port,
+            p2p_version=self.p2p_handshake_params.version,
         )
         return BCCPeerPool(
             privkey=self.privkey,
@@ -295,87 +303,3 @@ class BCCServer(BaseServer[BCCPeerPool]):
             peer_pool=self.peer_pool,
             token=self.cancel_token,
         )
-
-
-def _test() -> None:
-    import argparse
-    from pathlib import Path
-    import signal
-
-    from eth.chains.ropsten import ROPSTEN_GENESIS_HEADER
-
-    from p2p import ecies
-    from p2p.constants import ROPSTEN_BOOTNODES
-
-    from trinity.constants import ROPSTEN_NETWORK_ID
-    from trinity._utils.chains import load_nodekey
-
-    from tests.core.integration_test_helpers import (
-        FakeAsyncLevelDB, FakeAsyncHeaderDB, FakeAsyncChainDB, FakeAsyncRopstenChain)
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-db', type=str, required=True)
-    parser.add_argument('-debug', action="store_true")
-    parser.add_argument('-bootnodes', type=str, default=[])
-    parser.add_argument('-nodekey', type=str)
-
-    args = parser.parse_args()
-
-    logging.basicConfig(
-        level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s', datefmt='%H:%M:%S')
-    log_level = logging.INFO
-    if args.debug:
-        log_level = logging.DEBUG
-
-    loop = asyncio.get_event_loop()
-    db = FakeAsyncLevelDB(args.db)
-    headerdb = FakeAsyncHeaderDB(db)
-    chaindb = FakeAsyncChainDB(db)
-    chaindb.persist_header(ROPSTEN_GENESIS_HEADER)
-    chain = FakeAsyncRopstenChain(db)
-
-    # NOTE: Since we may create a different priv/pub key pair every time we run this, remote nodes
-    # may try to establish a connection using the pubkey from one of our previous runs, which will
-    # result in lots of DecryptionErrors in receive_handshake().
-    if args.nodekey:
-        privkey = load_nodekey(Path(args.nodekey))
-    else:
-        privkey = ecies.generate_privkey()
-
-    port = 30303
-    if args.bootnodes:
-        bootstrap_nodes = args.bootnodes.split(',')
-    else:
-        bootstrap_nodes = ROPSTEN_BOOTNODES
-    bootstrap_nodes = [Node.from_uri(enode) for enode in bootstrap_nodes]
-
-    server = FullServer(
-        privkey,
-        port,
-        chain,
-        chaindb,
-        headerdb,
-        db,
-        ROPSTEN_NETWORK_ID,
-        bootstrap_nodes=bootstrap_nodes,
-    )
-    server.logger.setLevel(log_level)
-
-    sigint_received = asyncio.Event()
-    for sig in [signal.SIGINT, signal.SIGTERM]:
-        loop.add_signal_handler(sig, sigint_received.set)
-
-    async def exit_on_sigint() -> None:
-        await sigint_received.wait()
-        await server.cancel()
-        loop.stop()
-
-    loop.set_debug(True)
-    asyncio.ensure_future(exit_on_sigint())
-    asyncio.ensure_future(server.run())
-    loop.run_forever()
-    loop.close()
-
-
-if __name__ == "__main__":
-    _test()

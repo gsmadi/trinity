@@ -12,8 +12,8 @@ from typing import (
 from eth._utils.datatypes import (
     Configurable,
 )
-from eth.db.backends.base import (
-    BaseAtomicDB,
+from eth.abc import (
+    AtomicDatabaseAPI,
 )
 from eth.exceptions import (
     BlockNotFound,
@@ -80,7 +80,7 @@ class BaseBeaconChain(Configurable, ABC):
     @classmethod
     @abstractmethod
     def get_chaindb_class(cls) -> Type[BaseBeaconChainDB]:
-        pass
+        ...
 
     #
     # Chain API
@@ -88,11 +88,11 @@ class BaseBeaconChain(Configurable, ABC):
     @classmethod
     @abstractmethod
     def from_genesis(cls,
-                     base_db: BaseAtomicDB,
+                     base_db: AtomicDatabaseAPI,
                      genesis_state: BeaconState,
                      genesis_block: BaseBeaconBlock,
                      genesis_config: Eth2GenesisConfig) -> 'BaseBeaconChain':
-        pass
+        ...
 
     #
     # State Machine API
@@ -102,63 +102,63 @@ class BaseBeaconChain(Configurable, ABC):
     def get_state_machine_class(
             cls,
             block: BaseBeaconBlock) -> Type['BaseBeaconStateMachine']:
-        pass
+        ...
 
     @abstractmethod
     def get_state_machine(self, at_slot: Slot=None) -> 'BaseBeaconStateMachine':
-        pass
+        ...
 
     @classmethod
     @abstractmethod
     def get_state_machine_class_for_block_slot(
             cls,
             slot: Slot) -> Type['BaseBeaconStateMachine']:
-        pass
+        ...
 
     @classmethod
     @abstractmethod
     def get_genesis_state_machine_class(self) -> Type['BaseBeaconStateMachine']:
-        pass
+        ...
 
     #
     # State API
     #
     @abstractmethod
     def get_state_by_slot(self, slot: Slot) -> Hash32:
-        pass
+        ...
 
     #
     # Block API
     #
     @abstractmethod
     def get_block_class(self, block_root: Hash32) -> Type[BaseBeaconBlock]:
-        pass
+        ...
 
     @abstractmethod
     def create_block_from_parent(self,
                                  parent_block: BaseBeaconBlock,
                                  block_params: FromBlockParams) -> BaseBeaconBlock:
-        pass
+        ...
 
     @abstractmethod
     def get_block_by_root(self, block_root: Hash32) -> BaseBeaconBlock:
-        pass
+        ...
 
     @abstractmethod
     def get_canonical_head(self) -> BaseBeaconBlock:
-        pass
+        ...
 
     @abstractmethod
     def get_score(self, block_root: Hash32) -> int:
-        pass
+        ...
 
     @abstractmethod
     def get_canonical_block_by_slot(self, slot: Slot) -> BaseBeaconBlock:
-        pass
+        ...
 
     @abstractmethod
     def get_canonical_block_root(self, slot: Slot) -> Hash32:
-        pass
+        ...
 
     @abstractmethod
     def import_block(
@@ -166,18 +166,18 @@ class BaseBeaconChain(Configurable, ABC):
             block: BaseBeaconBlock,
             perform_validation: bool=True
     ) -> Tuple[BaseBeaconBlock, Tuple[BaseBeaconBlock, ...], Tuple[BaseBeaconBlock, ...]]:
-        pass
+        ...
 
     #
     # Attestation API
     #
     @abstractmethod
     def get_attestation_by_root(self, attestation_root: Hash32)-> Attestation:
-        pass
+        ...
 
     @abstractmethod
     def attestation_exists(self, attestation_root: Hash32) -> bool:
-        pass
+        ...
 
 
 class BeaconChain(BaseBeaconChain):
@@ -192,7 +192,7 @@ class BeaconChain(BaseBeaconChain):
     chaindb_class = BeaconChainDB  # type: Type[BaseBeaconChainDB]
 
     def __init__(self,
-                 base_db: BaseAtomicDB,
+                 base_db: AtomicDatabaseAPI,
                  attestation_pool: AttestationPool,
                  genesis_config: Eth2GenesisConfig) -> None:
         if not self.sm_configuration:
@@ -221,7 +221,7 @@ class BeaconChain(BaseBeaconChain):
     #
     @classmethod
     def from_genesis(cls,
-                     base_db: BaseAtomicDB,
+                     base_db: AtomicDatabaseAPI,
                      genesis_state: BeaconState,
                      genesis_block: BaseBeaconBlock,
                      genesis_config: Eth2GenesisConfig) -> 'BaseBeaconChain':
@@ -249,7 +249,7 @@ class BeaconChain(BaseBeaconChain):
 
     @classmethod
     def _from_genesis_block(cls,
-                            base_db: BaseAtomicDB,
+                            base_db: AtomicDatabaseAPI,
                             attestation_pool: AttestationPool,
                             genesis_block: BaseBeaconBlock,
                             genesis_config: Eth2GenesisConfig) -> 'BaseBeaconChain':

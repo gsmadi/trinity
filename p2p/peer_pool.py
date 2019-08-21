@@ -201,10 +201,13 @@ class BasePeerPool(BaseService, AsyncIterable[BasePeer]):
 
             await self.wait(rate_limiter.take())
 
-            await self.wait(asyncio.gather(*(
-                self._add_peers_from_backend(backend)
-                for backend in self.peer_backends
-            )))
+            try:
+                await self.wait(asyncio.gather(*(
+                    self._add_peers_from_backend(backend)
+                    for backend in self.peer_backends
+                )))
+            except OperationCancelled:
+                break
 
     def __len__(self) -> int:
         return len(self.connected_nodes)
@@ -212,7 +215,7 @@ class BasePeerPool(BaseService, AsyncIterable[BasePeer]):
     @property
     @abstractmethod
     def peer_factory_class(self) -> Type[BasePeerFactory]:
-        pass
+        ...
 
     def get_peer_factory(self) -> BasePeerFactory:
         return self.peer_factory_class(
@@ -481,12 +484,12 @@ class BasePeerPool(BaseService, AsyncIterable[BasePeer]):
                     self.logger.warning(
                         "%s is no longer alive but has not been removed from pool", peer)
                     continue
-                most_received_type, count = max(
-                    peer.received_msgs.items(), key=operator.itemgetter(1))
                 self.logger.debug(
-                    "%s: uptime=%s, received_msgs=%d, most_received=%s(%d)",
-                    peer, humanize_seconds(peer.uptime), peer.received_msgs_count,
-                    most_received_type, count)
+                    "%s: uptime=%s, received_msgs=%d",
+                    peer,
+                    humanize_seconds(peer.uptime),
+                    peer.received_msgs_count,
+                )
                 self.logger.debug("client_version_string='%s'", peer.client_version_string)
                 for line in peer.get_extra_stats():
                     self.logger.debug("    %s", line)
