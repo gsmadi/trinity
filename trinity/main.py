@@ -8,7 +8,6 @@ from typing import (
     Type,
 )
 
-from eth.abc import AtomicDatabaseAPI
 from eth.db.backends.level import LevelDB
 from eth.db.chain import ChainDB
 
@@ -28,8 +27,8 @@ from trinity.initialization import (
     initialize_database,
     ensure_eth1_dirs,
 )
-from trinity.plugins.registry import (
-    get_plugins_for_eth1_client,
+from trinity.components.registry import (
+    get_components_for_eth1_client,
 )
 from trinity._utils.ipc import (
     wait_for_ipc,
@@ -47,7 +46,12 @@ from trinity._utils.profiling import (
 
 
 def main() -> None:
-    main_entry(trinity_boot, APP_IDENTIFIER_ETH1, get_plugins_for_eth1_client(), (Eth1AppConfig,))
+    main_entry(
+        trinity_boot,
+        APP_IDENTIFIER_ETH1,
+        get_components_for_eth1_client(),
+        (Eth1AppConfig,)
+    )
 
 
 def trinity_boot(args: Namespace,
@@ -90,7 +94,7 @@ def trinity_boot(args: Namespace,
 
 @setup_cprofiler('profile_db_process')
 @with_queued_logging
-def run_database_process(trinity_config: TrinityConfig, db_class: Type[AtomicDatabaseAPI]) -> None:
+def run_database_process(trinity_config: TrinityConfig, db_class: Type[LevelDB]) -> None:
     with trinity_config.process_id_file('database'):
         app_config = trinity_config.get_app_config(Eth1AppConfig)
 

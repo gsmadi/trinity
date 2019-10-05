@@ -1,56 +1,79 @@
-from typing import (
-    Tuple,
-    Union,
-)
+from enum import Enum
+from typing import Any, Dict, Optional
 
-from dataclasses import (
-    dataclass,
-    field,
-)
+from eth2._utils.bls import bls
+from eth2._utils.bls.backends import MilagroBackend
+from eth2.beacon.tools.fixtures.test_part import TestPart
+from eth2.configs import Eth2Config
 
-
-from eth2.beacon.types.attestations import Attestation
-from eth2.beacon.types.attester_slashings import AttesterSlashing
-from eth2.beacon.types.blocks import BeaconBlock
-from eth2.beacon.types.block_headers import BeaconBlockHeader
-from eth2.beacon.types.deposits import Deposit
-from eth2.beacon.types.proposer_slashings import ProposerSlashing
-from eth2.beacon.types.transfers import Transfer
-from eth2.beacon.types.voluntary_exits import VoluntaryExit
+from .test_handler import Input, Output, TestHandler
 
 
-from eth2.beacon.types.states import BeaconState
-from eth2.beacon.typing import (
-    Slot,
-)
+class BLSSetting(Enum):
+    Optional = 0
+    Enabled = 1
+    Disabled = 2
 
 
-Operation = Union[ProposerSlashing, AttesterSlashing, Attestation, Deposit, VoluntaryExit, Transfer]
-OperationOrBlockHeader = Union[Operation, BeaconBlockHeader]
+def _select_bls_backend(bls_setting: BLSSetting) -> None:
+    if bls_setting == BLSSetting.Disabled:
+        bls.use_noop_backend()
+    elif bls_setting == BLSSetting.Enabled:
+        bls.use(MilagroBackend)
+    elif bls_setting == BLSSetting.Optional:
+        # do not verify BLS to save time
+        bls.use_noop_backend()
 
 
-@dataclass
-class BaseTestCase:
-    handler: str
-    index: int
+# META_KEY is the prefix of the filename of the YAML file storing metadata about a test case.
+# e.g. in the context of a test case file tree, there is a file `meta.yaml`.
+META_KEY = "meta"
+
+BLS_SETTING_KEY = "bls_setting"
 
 
-@dataclass
-class StateTestCase(BaseTestCase):
-    bls_setting: bool
-    description: str
-    pre: BeaconState
-    post: BeaconState
-    slots: Slot = Slot(0)
-    blocks: Tuple[BeaconBlock, ...] = field(default_factory=tuple)
-    is_valid: bool = True
+class TestCase:
+    name: str
+    handler: TestHandler[Any, Any]
+    test_case_parts: Dict[str, TestPart]
+    config: Optional[Eth2Config]
 
+    def __init__(
+        self,
+        name: str,
+        handler: TestHandler[Input, Output],
+        test_case_parts: Dict[str, TestPart],
+        config: Optional[Eth2Config],
+    ) -> None:
+        self.name = name
+        self.handler = handler
+        self.test_case_parts = test_case_parts
+        self.config = config
 
-@dataclass
-class OperationCase(BaseTestCase):
-    bls_setting: bool
-    description: str
-    pre: BeaconState
-    operation: OperationOrBlockHeader
-    post: BeaconState
-    is_valid: bool = True
+        self.metadata = self._load_metadata()
+        self._process_meta(self.metadata)
+
+    def _load_metadata(self) -> Dict[str, Any]:
+        if META_KEY not in self.test_case_parts:
+            return {}
+
+        metadata_test_part = self.test_case_parts[META_KEY]
+        return metadata_test_part.load()
+
+    def _process_meta(self, metadata: Dict[str, Any]) -> None:
+        self.bls_setting = BLSSetting(metadata.get(BLS_SETTING_KEY, 0))
+
+    def valid(self) -> bool:
+        return self.handler.valid(self.test_case_parts)
+
+    def execute(self) -> None:
+        _select_bls_backend(self.bls_setting)
+        inputs = self.handler.parse_inputs(self.test_case_parts, self.metadata)
+        outputs = self.handler.run_with(inputs, self.config)
+
+        # NOTE: parse outputs after running the handler as we may trigger
+        # an exception due to an invalid test case that should raise before
+        # invalid decoding of empty output we expect to be missing.
+        expected_outputs = self.handler.parse_outputs(self.test_case_parts)
+
+        self.handler.condition(outputs, expected_outputs)

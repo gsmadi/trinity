@@ -4,26 +4,20 @@ import random
 from typing import (
     Dict,
     List,
-    NamedTuple,
     Tuple,
     Type,
+    Union,
 )
+
+from cached_property import cached_property
 
 from lahja import EndpointAPI
 
 from cancel_token import CancelToken
 
-from eth_typing import (
-    BlockNumber,
-    Hash32,
-)
-
 from eth_utils.toolz import groupby
 
-from eth.abc import VirtualMachineAPI
-from eth.constants import GENESIS_BLOCK_NUMBER
-
-from p2p.abc import NodeAPI
+from p2p.abc import BehaviorAPI, NodeAPI, SessionAPI
 from p2p.disconnect import DisconnectReason
 from p2p.exceptions import NoConnectedPeers
 from p2p.peer import (
@@ -43,11 +37,13 @@ from p2p.tracking.connection import (
 )
 
 from trinity.constants import TO_NETWORKING_BROADCAST_CONFIG
-from trinity.db.eth1.header import BaseAsyncHeaderDB
-from trinity.protocol.common.handlers import BaseChainExchangeHandler
+from trinity.protocol.common.abc import ChainInfoAPI, HeadInfoAPI
+from trinity.protocol.common.api import ChainInfo, HeadInfo
+from trinity.protocol.eth.api import ETHAPI
+from trinity.protocol.les.api import LESAPI
 
-from trinity.plugins.builtin.network_db.connection.tracker import ConnectionTrackerClient
-from trinity.plugins.builtin.network_db.eth1_peer_db.tracker import (
+from trinity.components.builtin.network_db.connection.tracker import ConnectionTrackerClient
+from trinity.components.builtin.network_db.eth1_peer_db.tracker import (
     BaseEth1PeerTracker,
     EventBusEth1PeerTracker,
     NoopEth1PeerTracker,
@@ -60,68 +56,37 @@ from .events import (
 )
 
 
-class ChainInfo(NamedTuple):
-    block_number: BlockNumber
-    block_hash: Hash32
-    total_difficulty: int
-    genesis_hash: Hash32
-
-    network_id: int
-
-
 class BaseChainPeer(BasePeer):
     boot_manager_class = DAOCheckBootManager
     context: ChainContext
 
-    head_td: int = None
-    head_hash: Hash32 = None
-    head_number: BlockNumber = None
-    network_id: int = None
-    genesis_hash: Hash32 = None
+    @cached_property
+    def chain_api(self) -> Union[ETHAPI, LESAPI]:
+        if self.connection.has_logic(ETHAPI.name):
+            return self.connection.get_logic(ETHAPI.name, ETHAPI)
+        elif self.connection.has_logic(LESAPI.name):
+            return self.connection.get_logic(LESAPI.name, LESAPI)
+        else:
+            raise Exception("Should be unreachable")
 
-    @property
-    @abstractmethod
-    def requests(self) -> BaseChainExchangeHandler:
-        ...
+    @cached_property
+    def head_info(self) -> HeadInfoAPI:
+        return self.connection.get_logic(HeadInfo.name, HeadInfo)
+
+    @cached_property
+    def chain_info(self) -> ChainInfoAPI:
+        return self.connection.get_logic(ChainInfo.name, ChainInfo)
+
+    def get_behaviors(self) -> Tuple[BehaviorAPI, ...]:
+        return (
+            HeadInfo().as_behavior(),
+            ChainInfo().as_behavior(),
+        )
 
     @property
     @abstractmethod
     def max_headers_fetch(self) -> int:
         ...
-
-    @property
-    def headerdb(self) -> BaseAsyncHeaderDB:
-        return self.context.headerdb
-
-    @property
-    def local_network_id(self) -> int:
-        return self.context.network_id
-
-    @property
-    def vm_configuration(self) -> Tuple[Tuple[int, Type[VirtualMachineAPI]], ...]:
-        return self.context.vm_configuration
-
-    _local_genesis_hash: Hash32 = None
-
-    async def _get_local_genesis_hash(self) -> Hash32:
-        if self._local_genesis_hash is None:
-            self._local_genesis_hash = await self.wait(
-                self.headerdb.coro_get_canonical_block_hash(BlockNumber(GENESIS_BLOCK_NUMBER))
-            )
-        return self._local_genesis_hash
-
-    @property
-    async def _local_chain_info(self) -> ChainInfo:
-        head = await self.wait(self.headerdb.coro_get_canonical_head())
-        total_difficulty = await self.wait(self.headerdb.coro_get_score(head.hash))
-        genesis_hash = await self._get_local_genesis_hash()
-        return ChainInfo(
-            block_number=head.block_number,
-            block_hash=head.hash,
-            total_difficulty=total_difficulty,
-            genesis_hash=genesis_hash,
-            network_id=self.local_network_id,
-        )
 
     def setup_connection_tracker(self) -> BaseConnectionTracker:
         if self.has_event_bus:
@@ -140,25 +105,25 @@ class BaseProxyPeer(BaseService):
     """
 
     def __init__(self,
-                 remote: NodeAPI,
+                 session: SessionAPI,
                  event_bus: EndpointAPI,
                  token: CancelToken = None):
 
         self.event_bus = event_bus
-        self.remote = remote
+        self.session = session
         super().__init__(token)
 
     def __str__(self) -> str:
-        return f"{self.__class__.__name__} {self.remote}"
+        return f"{self.__class__.__name__} {self.session}"
 
     async def _run(self) -> None:
         self.logger.debug("Starting Proxy Peer %s", self)
         await self.cancellation()
 
     async def disconnect(self, reason: DisconnectReason) -> None:
-        self.logger.debug("Forwarding `disconnect()` call from proxy to actual peer", self)
+        self.logger.debug("Forwarding `disconnect()` call from proxy to actual peer: %s", self)
         await self.event_bus.broadcast(
-            DisconnectPeerEvent(self.remote, reason),
+            DisconnectPeerEvent(self.session, reason),
             TO_NETWORKING_BROADCAST_CONFIG,
         )
         await self.cancel()
@@ -179,7 +144,8 @@ class BaseChainPeerPool(BasePeerPool):
         peers = tuple(self.connected_nodes.values())
         if not peers:
             raise NoConnectedPeers("No connected peers")
-        peers_by_td = groupby(operator.attrgetter('head_td'), peers)
+
+        peers_by_td = groupby(operator.attrgetter('head_info.head_td'), peers)
         max_td = max(peers_by_td.keys())
         return random.choice(peers_by_td[max_td])
 
@@ -188,7 +154,7 @@ class BaseChainPeerPool(BasePeerPool):
         # harder for callsites to get a list of peers while making blocking calls, as those peers
         # might disconnect in the meantime.
         peers = tuple(self.connected_nodes.values())
-        return [peer for peer in peers if peer.head_td >= min_td]
+        return [peer for peer in peers if peer.head_info.head_td >= min_td]
 
     def setup_connection_tracker(self) -> BaseConnectionTracker:
         if self.has_event_bus:

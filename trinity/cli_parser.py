@@ -6,9 +6,10 @@ from typing import (
     Any,
 )
 
-from eth_utils import ValidationError
-
-from eth.tools.logging import DEBUG2_LEVEL_NUM
+from eth_utils import (
+    DEBUG2_LEVEL_NUM,
+    ValidationError,
+)
 
 from p2p.kademlia import Node
 from p2p.validation import validate_enode_uri
@@ -132,7 +133,7 @@ parser = argparse.ArgumentParser(description='Trinity')
 #
 # subparser for sub commands
 #
-# Plugins may add subcommands with a `func` attribute
+# Components may add subcommands with a `func` attribute
 # to gain control over the main Trinity process
 subparser = parser.add_subparsers(dest='subcommand')
 
@@ -164,6 +165,16 @@ trinity_parser.add_argument(
     default=30303,
     help=(
         "Port on which trinity should listen for incoming p2p/discovery connections. Default: 30303"
+    ),
+)
+trinity_parser.add_argument(
+    '--trinity-tmp-root-dir',
+    action="store_true",
+    required=False,
+    default=False,
+    help=(
+        "If this flag is set, trinity will launch with a temporary root"
+        " directory as provided by the ``tempfile`` library."
     ),
 )
 
@@ -281,7 +292,7 @@ class EIP1085GenesisLoader(argparse.Action):
 chain_parser.add_argument(
     '--genesis',
     help=(
-        "File containing a custom genesis block header"
+        "File containing a custom genesis configuration file per EIP1085"
     ),
     action=EIP1085GenesisLoader,
 )

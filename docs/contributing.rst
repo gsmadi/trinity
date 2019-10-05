@@ -139,10 +139,22 @@ Before releasing a new version, build and test the package that will be released
     # Preview the upcoming release notes
     towncrier --draft
 
+Compile the release notes
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+After confirming that the release package looks okay, compile the release notes:
+
+.. code:: sh
+
+    make notes bump=$$VERSION_PART_TO_BUMP$$
+
+You may need to fix up any broken release note fragments before committing. Keep
+running make build-docs until it passes, then commit and carry on.
+
 Push the release to github & pypi
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-After confirming that the release package looks okay, release a new version:
+After committing the compiled release notes, release a new version:
 
 .. code:: sh
 
@@ -187,3 +199,43 @@ Then, push to docker hub:
     docker push ethereum/trinity:<version>
     # the following may be left out if we were pushing a patch for an older version
     docker push ethereum/trinity:latest
+
+
+How to release dappnode images
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Prerequisites:
+
+- `Docker <https://docs.docker.com/install/>`_
+- `Dappnode SDK <https://github.com/dappnode/DAppNodeSDK>`_
+
+1. Create the image
+
+.. code:: sh
+
+    make create-dappnode-image trinity_version=<version> dappnode_bump=<major|minor|patch>
+
+Please note that the dappnode image follows it's own versioning and that the `trinity_version`
+must refer to either a `tag` or a `commit` from this repository. The `dappnode_bump` must be
+either `major`, `minor` or `patch` and should be chosen as follows:
+
+- If the only change in the image is the pinned Trinity version, it should bump the same part
+  as the Trinity version bump. E.g. if the image carries a new Trinity patch version, then the
+  dappnode image should also be created with `dappnode_bump=patch`.
+
+- If the image contains other changes (e.g. a fix in the dappnode image itself), then the
+  traditional semver rules apply.
+
+2. Ensure the image can be installed and works
+
+Use the reported `Install link` to install the image on a DappNode.
+
+3. Publish the image to the Aragon Package Manager Registry.
+
+If the image works as intended, publish it to the APM registry using the Dappnode UI.
+
+- Dappnode Package Name: `trinity.public.dappnode.eth`
+- Next version: `<version-of-dappnode-image>`
+- Manifest hash: `<manifest-hash-as-reported-on-the-console>`
+
+Use MetaMask to publish the transaction and wait for it to get included in the chain.

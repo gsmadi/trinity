@@ -1,7 +1,9 @@
-from typing import TYPE_CHECKING
+import asyncio
+from typing import cast, TYPE_CHECKING
 
 from eth_utils import ValidationError
 
+from eth.abc import BlockNumber
 from eth.rlp.headers import BlockHeader
 from eth.vm.forks import HomesteadVM
 
@@ -44,17 +46,17 @@ class DAOCheckBootManager(BasePeerBootManager):
                 break
 
             dao_fork_num = vm_class.get_dao_fork_block_number()
-            start_block = dao_fork_num - 1
+            start_block = cast(BlockNumber, dao_fork_num - 1)
 
             try:
-                headers = await self.peer.requests.get_block_headers(  # type: ignore
+                headers = await self.peer.chain_api.get_block_headers(
                     start_block,
                     max_headers=2,
                     reverse=False,
                     timeout=CHAIN_SPLIT_CHECK_TIMEOUT,
                 )
 
-            except (TimeoutError, PeerConnectionLost) as err:
+            except (asyncio.TimeoutError, PeerConnectionLost) as err:
                 raise DAOForkCheckFailure(
                     f"Timed out waiting for DAO fork header from {self.peer}: {err}"
                 ) from err
@@ -86,13 +88,13 @@ class DAOCheckBootManager(BasePeerBootManager):
 
     async def _get_tip_header(self) -> BlockHeader:
         try:
-            headers = await self.peer.requests.get_block_headers(  # type: ignore
-                self.peer.head_hash,
+            headers = await self.peer.chain_api.get_block_headers(
+                self.peer.head_info.head_hash,
                 max_headers=1,
                 timeout=CHAIN_SPLIT_CHECK_TIMEOUT,
             )
 
-        except (TimeoutError, PeerConnectionLost) as err:
+        except (asyncio.TimeoutError, PeerConnectionLost) as err:
             raise DAOForkCheckFailure(
                 f"Timed out waiting for tip header from {self.peer}: {err}"
             ) from err

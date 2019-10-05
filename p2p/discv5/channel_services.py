@@ -6,6 +6,10 @@ from typing import (
 from trio.socket import (
     SocketType,
 )
+from socket import (
+    inet_aton,
+    inet_ntoa,
+)
 from trio.abc import (
     ReceiveChannel,
     SendChannel,
@@ -20,12 +24,18 @@ from p2p.trio_service import (
     ManagerAPI,
 )
 
+from p2p.discv5.constants import (
+    DATAGRAM_BUFFER_SIZE,
+)
+from p2p.discv5.messages import (
+    BaseMessage,
+)
 from p2p.discv5.packets import (
     decode_packet,
     Packet,
 )
-from p2p.discv5.constants import (
-    DATAGRAM_BUFFER_SIZE,
+from p2p.discv5.typing import (
+    NodeID,
 )
 
 
@@ -33,8 +43,11 @@ from p2p.discv5.constants import (
 # Data structures
 #
 class Endpoint(NamedTuple):
-    ip_address: str
+    ip_address: bytes
     port: int
+
+    def __str__(self) -> str:
+        return str((inet_ntoa(self.ip_address), self.port))
 
 
 class IncomingDatagram(NamedTuple):
@@ -51,10 +64,41 @@ class IncomingPacket(NamedTuple):
     packet: Packet
     sender_endpoint: Endpoint
 
+    def __str__(self) -> str:
+        return f"{self.__class__.__name__}[{self.packet.__class__.__name__}]"
+
 
 class OutgoingPacket(NamedTuple):
     packet: Packet
     receiver_endpoint: Endpoint
+
+    def __str__(self) -> str:
+        return f"{self.__class__.__name__}[{self.packet.__class__.__name__}]"
+
+
+class IncomingMessage(NamedTuple):
+    message: BaseMessage
+    sender_endpoint: Endpoint
+    sender_node_id: NodeID
+
+    def __str__(self) -> str:
+        return f"{self.__class__.__name__}[{self.message.__class__.__name__}]"
+
+    def to_response(self, response_message: BaseMessage) -> "OutgoingMessage":
+        return OutgoingMessage(
+            message=response_message,
+            receiver_endpoint=self.sender_endpoint,
+            receiver_node_id=self.sender_node_id,
+        )
+
+
+class OutgoingMessage(NamedTuple):
+    message: BaseMessage
+    receiver_endpoint: Endpoint
+    receiver_node_id: NodeID
+
+    def __str__(self) -> str:
+        return f"{self.__class__.__name__}[{self.message.__class__.__name__}]"
 
 
 #
@@ -71,7 +115,7 @@ async def DatagramReceiver(manager: ManagerAPI,
     async with incoming_datagram_send_channel:
         while manager.is_running:
             datagram, (ip_address, port) = await socket.recvfrom(DATAGRAM_BUFFER_SIZE)
-            endpoint = Endpoint(ip_address, port)
+            endpoint = Endpoint(inet_aton(ip_address), port)
             logger.debug(f"Received {len(datagram)} bytes from {endpoint}")
             incoming_datagram = IncomingDatagram(datagram, endpoint)
             await incoming_datagram_send_channel.send(incoming_datagram)
@@ -88,7 +132,7 @@ async def DatagramSender(manager: ManagerAPI,
     async with outgoing_datagram_receive_channel:
         async for datagram, endpoint in outgoing_datagram_receive_channel:
             logger.debug(f"Sending {len(datagram)} bytes to {endpoint}")
-            await socket.sendto(datagram, endpoint)
+            await socket.sendto(datagram, (inet_ntoa(endpoint.ip_address), endpoint.port))
 
 
 #

@@ -6,9 +6,9 @@ from typing import (
 )
 
 from eth_typing import BlockIdentifier
-from eth.rlp.headers import BlockHeader
+from eth.abc import BlockHeaderAPI
 
-from trinity.protocol.common.exchanges import (
+from p2p.exchange import (
     BaseExchange,
 )
 from trinity._utils.les import (
@@ -32,10 +32,14 @@ from .validators import (
 TResult = TypeVar('TResult')
 
 
-LESExchange = BaseExchange[Dict[str, Any], Dict[str, Any], TResult]
+BaseGetBlockHeadersExchange = BaseExchange[
+    Dict[str, Any],
+    Dict[str, Any],
+    Tuple[BlockHeaderAPI, ...],
+]
 
 
-class GetBlockHeadersExchange(LESExchange[Tuple[BlockHeader, ...]]):
+class GetBlockHeadersExchange(BaseGetBlockHeadersExchange):
     _normalizer = BlockHeadersNormalizer()
     request_class = GetBlockHeadersRequest
     tracker_class = GetBlockHeadersTracker
@@ -46,18 +50,18 @@ class GetBlockHeadersExchange(LESExchange[Tuple[BlockHeader, ...]]):
             max_headers: int = None,
             skip: int = 0,
             reverse: bool = True,
-            timeout: float = None) -> Tuple[BlockHeader, ...]:
+            timeout: float = None) -> Tuple[BlockHeaderAPI, ...]:
 
         original_request_args = (block_number_or_hash, max_headers, skip, reverse)
         validator = GetBlockHeadersValidator(*original_request_args)
 
         command_args = original_request_args + (gen_request_id(),)
-        request = self.request_class(*command_args)  # type: ignore
+        request = self.request_class(*command_args)
 
-        return await self.get_result(
+        return tuple(await self.get_result(
             request,
             self._normalizer,
             validator,
             match_payload_request_id,
             timeout,
-        )
+        ))

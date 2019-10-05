@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, Sequence, Tuple, TypeVar, Union
 
 from mypy_extensions import TypedDict
 
@@ -11,10 +11,15 @@ class TypedDictPayload(TypedDict):
 
 Payload = Union[
     Dict[str, Any],
-    List[rlp.Serializable],
-    Tuple[rlp.Serializable, ...],
+    Sequence[rlp.Serializable],
     TypedDictPayload,
 ]
+
+
+# A payload to be delivered with a request
+TRequestPayload = TypeVar('TRequestPayload', bound=Payload, covariant=True)
+# A payload to be delivered as a response
+TResponsePayload = TypeVar('TResponsePayload', bound=Payload)
 
 
 Structure = Union[

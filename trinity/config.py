@@ -49,7 +49,7 @@ from multiaddr import (
 )
 
 from eth2.beacon.chains.testnet import (
-    TestnetChain,
+    SkeletonLakeChain,
 )
 from eth2.beacon.genesis import (
     get_genesis_block,
@@ -99,14 +99,12 @@ from trinity.constants import (
     ROPSTEN_NETWORK_ID,
     SYNC_LIGHT,
 )
-from trinity.plugins.eth2.beacon.utils import (
+from trinity.components.eth2.beacon.utils import (
     extract_genesis_state_from_stream,
     extract_privkeys_from_dir,
 )
-from trinity.plugins.eth2.constants import (
+from trinity.components.eth2.constants import (
     VALIDATOR_KEY_DIR,
-)
-from trinity.plugins.eth2.network_generator.constants import (
     GENESIS_FILE,
 )
 
@@ -116,7 +114,7 @@ if TYPE_CHECKING:
     from trinity.nodes.base import Node  # noqa: F401
     from trinity.chains.full import FullChain  # noqa: F401
     from trinity.chains.light import LightDispatchChain  # noqa: F401
-    from eth2.beacon.chains.base import BeaconChain  # noqa: F401
+    from eth2.beacon.chains.base import BaseBeaconChain  # noqa: F401
     from eth2.beacon.state_machines.base import BaseBeaconStateMachine  # noqa: F401
 
 DATABASE_DIR_NAME = 'chain'
@@ -248,7 +246,7 @@ class TrinityConfig:
     to the more specific application configurations derived from
     :class:`~trinity.config.BaseAppConfig`.
 
-    This API is exposed to :class:`~trinity.extensibility.plugin.BasePlugin`
+    This API is exposed to :class:`~trinity.extensibility.component.BaseComponent`
     """
 
     _trinity_root_dir: Path = None
@@ -275,9 +273,10 @@ class TrinityConfig:
                  app_identifier: str="",
                  genesis_config: Dict[str, Any]=None,
                  max_peers: int=25,
-                 trinity_root_dir: str=None,
-                 data_dir: str=None,
-                 nodekey_path: str=None,
+                 trinity_root_dir: Path=None,
+                 trinity_tmp_root_dir: bool=False,
+                 data_dir: Path=None,
+                 nodekey_path: Path=None,
                  nodekey: PrivateKey=None,
                  port: int=30303,
                  use_discv5: bool = False,
@@ -303,6 +302,7 @@ class TrinityConfig:
 
         if trinity_root_dir is not None:
             self.trinity_root_dir = trinity_root_dir
+        self.trinity_tmp_root_dir = trinity_tmp_root_dir
 
         if not preferred_nodes and self.network_id in DEFAULT_PREFERRED_NODES:
             self.preferred_nodes = DEFAULT_PREFERRED_NODES[self.network_id]
@@ -654,7 +654,7 @@ class BeaconChainConfig:
     network_id: int
     genesis_data: BeaconGenesisData
     _chain_name: str
-    _beacon_chain_class: Type['BeaconChain'] = None
+    _beacon_chain_class: Type['BaseBeaconChain'] = None
     _genesis_config: Eth2GenesisConfig = None
 
     def __init__(self,
@@ -683,11 +683,11 @@ class BeaconChainConfig:
             return self._chain_name
 
     @property
-    def beacon_chain_class(self) -> Type['BeaconChain']:
+    def beacon_chain_class(self) -> Type['BaseBeaconChain']:
         if self._beacon_chain_class is None:
             # TODO: we should be able to customize configs for tests/ instead of using the configs
             #   from `TestnetChain`
-            self._beacon_chain_class = TestnetChain.configure(
+            self._beacon_chain_class = SkeletonLakeChain.configure(
                 __name__=self.chain_name,
             )
         return self._beacon_chain_class
@@ -714,7 +714,7 @@ class BeaconChainConfig:
         )
 
     def initialize_chain(self,
-                         base_db: AtomicDatabaseAPI) -> 'BeaconChain':
+                         base_db: AtomicDatabaseAPI) -> 'BaseBeaconChain':
         chain_class = self.beacon_chain_class
         state = self.genesis_data.state
         block = get_genesis_block(
@@ -742,10 +742,10 @@ class BeaconAppConfig(BaseAppConfig):
         if args is not None:
             # This is quick and dirty way to get bootstrap_nodes
             trinity_config.bootstrap_nodes = tuple(
-                Multiaddr(maddr) for maddr in args.bootstrap_nodes.split(',')
+                Multiaddr(maddr.strip()) for maddr in args.bootstrap_nodes.split(',') if maddr
             ) if args.bootstrap_nodes is not None else tuple()
             trinity_config.preferred_nodes = tuple(
-                Multiaddr(maddr) for maddr in args.preferred_nodes.split(',')
+                Multiaddr(maddr.strip()) for maddr in args.preferred_nodes.split(',') if maddr
             ) if args.preferred_nodes is not None else tuple()
         return cls(trinity_config)
 
@@ -765,5 +765,5 @@ class BeaconAppConfig(BaseAppConfig):
         """
         return BeaconChainConfig.from_genesis_files(
             root_dir=self.trinity_config.trinity_root_dir,
-            chain_name="TestnetChain",
+            chain_name="SkeletonLakeChain",
         )

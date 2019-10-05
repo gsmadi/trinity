@@ -8,9 +8,8 @@ from typing import (
 from lahja import EndpointAPI
 
 from cancel_token import CancelToken
-from eth.abc import DatabaseAPI
-from eth.constants import GENESIS_PARENT_HASH, MAX_UNCLE_DEPTH
-from eth.db.backends.base import BaseAtomicDB
+from eth.abc import AtomicDatabaseAPI, DatabaseAPI
+from eth.constants import GENESIS_PARENT_HASH
 from eth.exceptions import (
     HeaderNotFound,
 )
@@ -18,11 +17,12 @@ from eth.rlp.blocks import BaseBlock
 from eth.rlp.headers import BlockHeader
 from eth.rlp.transactions import BaseTransaction
 from eth_typing import (
-    Hash32,
     BlockNumber,
+    Hash32,
 )
 from eth_utils import (
     ValidationError,
+    get_extended_debug_logger,
 )
 import rlp
 
@@ -33,6 +33,12 @@ from trinity.db.eth1.chain import BaseAsyncChainDB
 from trinity.db.eth1.header import BaseAsyncHeaderDB
 from trinity.protocol.eth.peer import ETHPeerPool
 from trinity.protocol.eth.sync import ETHHeaderChainSyncer
+from trinity.sync.beam.constants import (
+    FULL_BLOCKS_NEEDED_TO_START_BEAM,
+)
+from trinity.sync.common.checkpoint import (
+    Checkpoint,
+)
 from trinity.sync.common.chain import (
     BaseBlockImporter,
 )
@@ -50,6 +56,11 @@ from trinity.sync.common.headers import (
     HeaderSyncerAPI,
     ManualHeaderSyncer,
 )
+from trinity.sync.common.strategies import (
+    FromCheckpointLaunchStrategy,
+    FromGenesisLaunchStrategy,
+    SyncLaunchStrategyAPI,
+)
 from trinity.sync.full.chain import (
     FastChainBodySyncer,
     RegularChainBodySyncer,
@@ -60,8 +71,9 @@ from trinity.sync.full.constants import (
 from trinity.sync.beam.state import (
     BeamDownloader,
 )
-from trinity._utils.logging import HasExtendedDebugLogger
 from trinity._utils.timer import Timer
+
+from .backfill import BeamStateBackfill
 
 STATS_DISPLAY_PERIOD = 10
 
@@ -75,7 +87,7 @@ class BeamSyncer(BaseService):
         - When you catch up with a peer, start downloading transactions needed to execute a block
         - At the checkpoint, switch to full block imports, with a custom importer
 
-    This syncer relies on a seperately orchestrated beam sync plugin, which:
+    This syncer relies on a seperately orchestrated beam sync component, which:
 
         - listens for DoStatelessBlockImport events
         - emits events when data is missing, like CollectMissingAccount
@@ -87,22 +99,52 @@ class BeamSyncer(BaseService):
     def __init__(
             self,
             chain: AsyncChainAPI,
-            db: BaseAtomicDB,
+            db: AtomicDatabaseAPI,
             chain_db: BaseAsyncChainDB,
             peer_pool: ETHPeerPool,
             event_bus: EndpointAPI,
-            force_beam_block_number: int = None,
+            checkpoint: Checkpoint = None,
+            force_beam_block_number: BlockNumber = None,
             token: CancelToken = None) -> None:
         super().__init__(token=token)
 
-        self._header_syncer = ETHHeaderChainSyncer(chain, chain_db, peer_pool, self.cancel_token)
+        if checkpoint is None:
+            self._launch_strategy: SyncLaunchStrategyAPI = FromGenesisLaunchStrategy(
+                chain_db,
+                chain
+            )
+        else:
+            self._launch_strategy = FromCheckpointLaunchStrategy(
+                chain_db,
+                chain,
+                checkpoint,
+                peer_pool,
+            )
+
+        self._header_syncer = ETHHeaderChainSyncer(
+            chain,
+            chain_db,
+            peer_pool,
+            self._launch_strategy,
+            self.cancel_token
+        )
         self._header_persister = HeaderOnlyPersist(
             self._header_syncer,
             chain_db,
             force_beam_block_number,
+            self._launch_strategy,
             self.cancel_token,
         )
-        self._state_downloader = BeamDownloader(db, peer_pool, event_bus, self.cancel_token)
+
+        self._backfiller = BeamStateBackfill(db, peer_pool, token=self.cancel_token)
+
+        self._state_downloader = BeamDownloader(
+            db,
+            peer_pool,
+            self._backfiller,
+            event_bus,
+            self.cancel_token,
+        )
         self._data_hunter = MissingDataEventHandler(
             self._state_downloader,
             event_bus,
@@ -113,6 +155,7 @@ class BeamSyncer(BaseService):
             chain,
             db,
             self._state_downloader,
+            self._backfiller,
             event_bus,
             self.cancel_token,
         )
@@ -138,6 +181,16 @@ class BeamSyncer(BaseService):
         self._chain = chain
 
     async def _run(self) -> None:
+
+        try:
+            await self.wait(self._launch_strategy.fulfill_prerequisites())
+        except asyncio.TimeoutError as exc:
+            self.logger.exception(
+                "Timed out while trying to fulfill prerequisites of "
+                f"sync launch strategy: {exc} from {self._launch_strategy}"
+            )
+            await self.cancel()
+
         self.run_daemon(self._header_syncer)
 
         # Kick off the body syncer early (it hangs on the checkpoint header syncer anyway)
@@ -167,6 +220,9 @@ class BeamSyncer(BaseService):
         # Start state downloader service
         self.run_daemon(self._state_downloader)
 
+        # Start state background service
+        self.run_daemon(self._backfiller)
+
         # run sync until cancelled
         await self.cancellation()
 
@@ -175,9 +231,7 @@ class BeamSyncer(BaseService):
         When importing a block, we need to validate uncles against the previous
         six blocks, so download those bodies and persist them to the database.
         """
-        # We need MAX_UNCLE_DEPTH + 1 headers to check during uncle validation
-        # We need to request one more header, to set the starting tip
-        parents_needed = MAX_UNCLE_DEPTH + 2
+        parents_needed = FULL_BLOCKS_NEEDED_TO_START_BEAM
 
         self.logger.info(
             "Downloading %d block bodies for uncle validation, before %s",
@@ -286,7 +340,7 @@ class RigorousFastChainBodySyncer(FastChainBodySyncer):
         self._starting_tip = header
 
 
-class HeaderCheckpointSyncer(HeaderSyncerAPI, HasExtendedDebugLogger):
+class HeaderCheckpointSyncer(HeaderSyncerAPI):
     """
     Wraps a "real" header syncer, and drops headers on the floor, until triggered
     at a "checkpoint".
@@ -296,6 +350,8 @@ class HeaderCheckpointSyncer(HeaderSyncerAPI, HasExtendedDebugLogger):
 
     Can be used by a body syncer to pause syncing until a header checkpoint is reached.
     """
+    logger = get_extended_debug_logger('trinity.sync.beam.chain.HeaderCheckpointSyncer')
+
     def __init__(self, passthrough: HeaderSyncerAPI) -> None:
         self._real_syncer = passthrough
         self._at_checkpoint = asyncio.Event()
@@ -334,12 +390,14 @@ class HeaderOnlyPersist(BaseService):
                  header_syncer: ETHHeaderChainSyncer,
                  db: BaseAsyncHeaderDB,
                  force_end_block_number: int = None,
+                 launch_strategy: SyncLaunchStrategyAPI = None,
                  token: CancelToken = None) -> None:
         super().__init__(token=token)
         self._db = db
         self._header_syncer = header_syncer
         self._final_headers: Tuple[BlockHeader, ...] = None
         self._force_end_block_number = force_end_block_number
+        self._launch_strategy = launch_strategy
 
     async def _run(self) -> None:
         self.run_daemon_task(self._persist_headers())
@@ -354,7 +412,9 @@ class HeaderOnlyPersist(BaseService):
             if exited:
                 break
 
-            await self.wait(self._db.coro_persist_header_chain(headers))
+            new_canon_headers, old_canon_headers = await self.wait(
+                self._db.coro_persist_header_chain(headers)
+            )
 
             head = await self.wait(self._db.coro_get_canonical_head())
 
@@ -363,6 +423,15 @@ class HeaderOnlyPersist(BaseService):
                 len(headers),
                 timer.elapsed,
                 head,
+            )
+            self.logger.debug(
+                "Header import details: %s..%s, old canon: %s..%s, new canon: %s..%s",
+                headers[0],
+                headers[-1],
+                old_canon_headers[0] if len(old_canon_headers) else None,
+                old_canon_headers[-1] if len(old_canon_headers) else None,
+                new_canon_headers[0] if len(new_canon_headers) else None,
+                new_canon_headers[-1] if len(new_canon_headers) else None,
             )
 
     async def _exit_if_checkpoint(self, headers: Tuple[BlockHeader, ...]) -> bool:
@@ -412,10 +481,27 @@ class HeaderOnlyPersist(BaseService):
                 # We have not reached the header syncer's target, continue normally
                 return False
 
-        await self.wait(self._db.coro_persist_header_chain(persist_headers))
+        new_canon_headers, old_canon_headers = await self.wait(
+            self._db.coro_persist_header_chain(persist_headers)
+        )
+
+        if persist_headers:
+            self.logger.debug(
+                "Final header import before checkpoint: %s..%s, "
+                "old canon: %s..%s, new canon: %s..%s",
+                persist_headers[0],
+                persist_headers[-1],
+                old_canon_headers[0] if len(old_canon_headers) else None,
+                old_canon_headers[-1] if len(old_canon_headers) else None,
+                new_canon_headers[0] if len(new_canon_headers) else None,
+                new_canon_headers[-1] if len(new_canon_headers) else None,
+            )
+        else:
+            self.logger.debug("Final header import before checkpoint: None")
 
         self._final_headers = final_headers
         self.cancel_nowait()
+
         return True
 
     def get_final_headers(self) -> Tuple[BlockHeader, ...]:
@@ -443,6 +529,7 @@ class BeamBlockImporter(BaseBlockImporter, BaseService):
             chain: AsyncChainAPI,
             db: DatabaseAPI,
             state_getter: BeamDownloader,
+            backfiller: BeamStateBackfill,
             event_bus: EndpointAPI,
             token: CancelToken=None) -> None:
         super().__init__(token=token)
@@ -450,6 +537,7 @@ class BeamBlockImporter(BaseBlockImporter, BaseService):
         self._chain = chain
         self._db = db
         self._state_downloader = state_getter
+        self._backfiller = backfiller
 
         self._blocks_imported = 0
         self._preloaded_account_state = 0
@@ -459,7 +547,6 @@ class BeamBlockImporter(BaseBlockImporter, BaseService):
         self._import_time: float = 0
 
         self._event_bus = event_bus
-        # TODO: implement speculative execution, but at the txn level instead of block level
 
     async def import_block(
             self,
@@ -506,6 +593,8 @@ class BeamBlockImporter(BaseBlockImporter, BaseService):
         self._event_bus.broadcast_nowait(
             DoStatelessBlockPreview(old_state_header, transactions)
         )
+
+        self._backfiller.set_root_hash(parent_state_root)
 
     async def _preview_address_load(
             self,

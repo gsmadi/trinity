@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+import asyncio
 from typing import (
     AsyncIterator,
     Tuple,
@@ -75,7 +76,7 @@ class PeerHeaderSyncer(BaseService):
         self.db = db
         self.sync_progress: SyncProgress = None
         self._peer = peer
-        self._target_header_hash = peer.head_hash
+        self._target_header_hash = peer.head_info.head_hash
 
     def get_target_header_hash(self) -> Hash32:
         if self._target_header_hash is None:
@@ -96,16 +97,20 @@ class PeerHeaderSyncer(BaseService):
 
         head = await self.wait(self.db.coro_get_canonical_head())
         head_td = await self.wait(self.db.coro_get_score(head.hash))
-        if peer.head_td <= head_td:
+        if peer.head_info.head_td <= head_td:
             self.logger.info(
                 "Head TD (%d) announced by %s not higher than ours (%d), not syncing",
-                peer.head_td, peer, head_td)
+                peer.head_info.head_td, peer, head_td)
             return
         else:
             self.logger.debug(
                 "%s announced Head TD %d, which is higher than ours (%d), starting sync",
-                peer, peer.head_td, head_td)
-        self.sync_progress = SyncProgress(head.block_number, head.block_number, peer.head_number)
+                peer, peer.head_info.head_td, head_td)
+        self.sync_progress = SyncProgress(
+            head.block_number,
+            head.block_number,
+            peer.head_info.head_number,
+        )
         self.logger.info("Starting sync with %s", peer)
         last_received_header: BlockHeaderAPI = None
         # When we start the sync with a peer, we always request up to MAX_REORG_DEPTH extra
@@ -113,7 +118,7 @@ class PeerHeaderSyncer(BaseService):
         # time _sync() was called. All of the extra headers that are already present in our DB
         # will be discarded by skip_complete_headers() so we don't unnecessarily process them
         # again.
-        start_at = max(GENESIS_BLOCK_NUMBER + 1, head.block_number - MAX_REORG_DEPTH)
+        start_at = BlockNumber(max(GENESIS_BLOCK_NUMBER + 1, head.block_number - MAX_REORG_DEPTH))
         while self.is_operational:
             if not peer.is_operational:
                 self.logger.info("%s disconnected, aborting sync", peer)
@@ -128,10 +133,10 @@ class PeerHeaderSyncer(BaseService):
                     )
                     if len(new_headers) == 0 and len(completed_headers) > 0:
                         head = await self.wait(self.db.coro_get_canonical_head())
-                        start_at = max(
+                        start_at = BlockNumber(max(
                             all_headers[-1].block_number + 1,
                             head.block_number - MAX_REORG_DEPTH
-                        )
+                        ))
                         self.logger.debug(
                             "All %d headers redundant, head at %s, fetching from #%d",
                             len(completed_headers),
@@ -153,7 +158,7 @@ class PeerHeaderSyncer(BaseService):
             except OperationCancelled:
                 self.logger.info("Sync with %s completed", peer)
                 break
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 self.logger.warning("Timeout waiting for header batch from %s, aborting sync", peer)
                 await peer.disconnect(DisconnectReason.timeout)
                 break
@@ -170,13 +175,13 @@ class PeerHeaderSyncer(BaseService):
                     request_parent = head
                 else:
                     request_parent = last_received_header
-                if head_td < peer.head_td:
+                if head_td < peer.head_info.head_td:
                     # peer claims to have a better header, but didn't return it. Boot peer
                     # TODO ... also blacklist, because it keeps trying to reconnect
                     self.logger.warning(
                         "%s announced difficulty %s, but didn't return any headers after %r@%s",
                         peer,
-                        peer.head_td,
+                        peer.head_info.head_td,
                         request_parent,
                         head_td,
                     )
@@ -230,21 +235,21 @@ class PeerHeaderSyncer(BaseService):
                 head_td += header.difficulty
 
             # Setting the latest header hash for the peer, before queuing header processing tasks
-            self._target_header_hash = peer.head_hash
+            self._target_header_hash = peer.head_info.head_hash
 
             yield new_headers
             last_received_header = new_headers[-1]
             self.sync_progress = self.sync_progress.update_current_block(
                 last_received_header.block_number,
             )
-            start_at = last_received_header.block_number + 1
+            start_at = BlockNumber(last_received_header.block_number + 1)
 
     async def _request_headers(
             self, peer: BaseChainPeer, start_at: BlockNumber) -> Tuple[BlockHeaderAPI, ...]:
         """Fetch a batch of headers starting at start_at and return the ones we're missing."""
         self.logger.debug("Requsting chain of headers from %s starting at #%d", peer, start_at)
 
-        return await peer.requests.get_block_headers(
+        return await peer.chain_api.get_block_headers(
             start_at,
             peer.max_headers_fetch,
             skip=0,

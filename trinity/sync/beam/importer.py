@@ -1,5 +1,6 @@
+from abc import abstractmethod
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from concurrent import futures
 from operator import attrgetter
 from typing import (
     Any,
@@ -8,6 +9,7 @@ from typing import (
     Tuple,
     Type,
     TypeVar,
+    cast,
 )
 
 from cancel_token import CancelToken
@@ -20,6 +22,7 @@ from eth.abc import (
     StateAPI,
     VirtualMachineAPI,
 )
+from eth.typing import VMConfiguration
 from eth.vm.interrupt import (
     MissingAccountTrieNode,
     MissingBytecode,
@@ -30,7 +33,9 @@ from eth_typing import (
     Hash32,
 )
 from eth_utils import (
+    ExtendedDebugLogger,
     ValidationError,
+    get_extended_debug_logger,
 )
 from eth_utils.toolz import (
     groupby,
@@ -42,7 +47,6 @@ from lahja.common import BroadcastConfig
 from p2p.service import BaseService
 
 from trinity._utils.timer import Timer
-from trinity.chains.base import AsyncChainAPI
 from trinity.chains.full import FullChain
 from trinity.sync.beam.constants import (
     MAX_SPECULATIVE_EXECUTIONS_PER_PROCESS,
@@ -63,6 +67,48 @@ from trinity.sync.common.events import (
 ImportBlockType = Tuple[BlockAPI, Tuple[BlockAPI, ...], Tuple[BlockAPI, ...]]
 
 
+class BeamStats:
+    num_accounts = 0
+    num_account_nodes = 0
+    num_bytecodes = 0
+    num_storages = 0
+    num_storage_nodes = 0
+
+    # How much time is spent waiting on retrieving nodes?
+    data_pause_time = 0.0
+
+    def __str__(self) -> str:
+        node_count = self.num_account_nodes + self.num_bytecodes + self.num_storage_nodes
+
+        if node_count:
+            avg_rtt = self.data_pause_time / node_count
+        else:
+            avg_rtt = 0
+
+        return (
+            f"BeamStat: accts={self.num_accounts}, "
+            f"a_nodes={self.num_account_nodes}, codes={self.num_bytecodes}, "
+            f"strg={self.num_storages}, s_nodes={self.num_storage_nodes}, "
+            f"nodes={node_count}, rtt={avg_rtt:.3f}s, wait={self.data_pause_time:.2f}s"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"BeamStats(num_accounts={self.num_accounts}, "
+            f"num_account_nodes={self.num_account_nodes}, num_bytecodes={self.num_bytecodes}, "
+            f"num_storages={self.num_storages}, num_storage_nodes={self.num_storage_nodes}, "
+            f"data_pause_time={self.data_pause_time:.3f}s)"
+        )
+
+
+class PausingVMAPI(VirtualMachineAPI):
+    logger: ExtendedDebugLogger
+
+    @abstractmethod
+    def get_beam_stats(self) -> BeamStats:
+        ...
+
+
 class BeamChain(FullChain):
     """
     The primary job of this patched BeamChain is to keep track of the
@@ -74,23 +120,26 @@ class BeamChain(FullChain):
 
     My finest NFT to whoever replaces this with something better...
     """
-    _first_vm = None
+    _first_vm: PausingVMAPI = None
 
-    def get_vm(self, header: BlockHeaderAPI) -> VirtualMachineAPI:
-        vm = super().get_vm(header)
+    def get_vm(self, at_header: BlockHeaderAPI = None) -> PausingVMAPI:
+        vm = cast(PausingVMAPI, super().get_vm(at_header))
         if self._first_vm is None:
             self._first_vm = vm
         return vm
 
-    def get_first_vm(self) -> VirtualMachineAPI:
-        return self._first_vm
+    def get_first_vm(self) -> PausingVMAPI:
+        if self._first_vm is None:
+            return self.get_vm()
+        else:
+            return self._first_vm
 
     def clear_first_vm(self) -> None:
         self._first_vm = None
 
 
 def make_pausing_beam_chain(
-        vm_config: Tuple[Tuple[int, VirtualMachineAPI], ...],
+        vm_config: VMConfiguration,
         chain_id: int,
         db: AtomicDatabaseAPI,
         event_bus: EndpointAPI,
@@ -112,33 +161,6 @@ def make_pausing_beam_chain(
 
 
 TVMFuncReturn = TypeVar('TVMFuncReturn')
-
-
-class BeamStats:
-    num_accounts = 0
-    num_account_nodes = 0
-    num_bytecodes = 0
-    num_storages = 0
-    num_storage_nodes = 0
-
-    # How much time is spent waiting on retrieving nodes?
-    data_pause_time = 0.0
-
-    def __str__(self) -> str:
-        return (
-            f"BeamStat: accts={self.num_accounts}, "
-            f"a_nodes={self.num_account_nodes}, codes={self.num_bytecodes}, "
-            f"strg={self.num_storages}, s_nodes={self.num_storage_nodes}, "
-            f"wait={self.data_pause_time:.2f}s"
-        )
-
-    def __repr__(self) -> str:
-        return (
-            f"BeamStats(num_accounts={self.num_accounts}, "
-            f"num_account_nodes={self.num_account_nodes}, num_bytecodes={self.num_bytecodes}, "
-            f"num_storages={self.num_storages}, num_storage_nodes={self.num_storage_nodes}, "
-            f"data_pause_time={self.data_pause_time:.3f}s)"
-        )
 
 
 def pausing_vm_decorator(
@@ -184,12 +206,37 @@ def pausing_vm_decorator(
         A custom version of VMState that pauses EVM execution when required data is missing.
         """
         stats_counter: BeamStats
+        node_retrieval_timeout = 20
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
             self.stats_counter = BeamStats()
 
         def _pause_on_missing_data(
+                self,
+                vm_method: Callable[[Any], TVMFuncReturn],
+                *args: Any,
+                **kwargs: Any) -> TVMFuncReturn:
+            """
+            Catch exceptions about missing state data and pause while waiting for
+            the event bus to reply with the needed data. Repeat if there is a request timeout.
+            """
+            while True:
+                try:
+                    return self._request_missing_data(vm_method, *args, **kwargs)
+                except futures.TimeoutError:
+                    self.stats_counter.data_pause_time += self.node_retrieval_timeout
+
+                    if urgent:
+                        log_func = self.logger.warning
+                    else:
+                        log_func = self.logger.debug
+                    log_func(
+                        "Beam Sync: retrying state data request after timeout. Stats so far: %s",
+                        self.stats_counter,
+                    )
+
+        def _request_missing_data(
                 self,
                 vm_method: Callable[[Any], TVMFuncReturn],
                 *args: Any,
@@ -211,8 +258,7 @@ def pausing_vm_decorator(
                         ),
                         loop,
                     )
-                    # TODO put in a loop to truly wait forever
-                    account_event = account_future.result(timeout=300)
+                    account_event = account_future.result(timeout=self.node_retrieval_timeout)
                     self.stats_counter.num_accounts += 1
                     self.stats_counter.num_account_nodes += account_event.num_nodes_collected
                     self.stats_counter.data_pause_time += t.elapsed
@@ -224,8 +270,7 @@ def pausing_vm_decorator(
                         ),
                         loop,
                     )
-                    # TODO put in a loop to truly wait forever
-                    bytecode_future.result(timeout=300)
+                    bytecode_future.result(timeout=self.node_retrieval_timeout)
                     self.stats_counter.num_bytecodes += 1
                     self.stats_counter.data_pause_time += t.elapsed
                 except MissingStorageTrieNode as exc:
@@ -239,8 +284,7 @@ def pausing_vm_decorator(
                         ),
                         loop,
                     )
-                    # TODO put in a loop to truly wait forever
-                    storage_event = storage_future.result(timeout=300)
+                    storage_event = storage_future.result(timeout=self.node_retrieval_timeout)
                     self.stats_counter.num_storages += 1
                     self.stats_counter.num_storage_nodes += storage_event.num_nodes_collected
                     self.stats_counter.data_pause_time += t.elapsed
@@ -300,6 +344,8 @@ def pausing_vm_decorator(
             return self._pause_on_missing_data(super().make_state_root)
 
     class PausingVM(original_vm_class):  # type: ignore
+        logger = get_extended_debug_logger(f'eth.vm.base.VM.{original_vm_class.__name__}')
+
         @classmethod
         def get_state_class(cls) -> Type[StateAPI]:
             return PausingVMState
@@ -327,11 +373,13 @@ def _broadcast_import_complete(
     )
 
 
-def partial_import_block(beam_chain: AsyncChainAPI, block: BlockAPI) -> Callable[[], None]:
+def partial_import_block(beam_chain: BeamChain,
+                         block: BlockAPI,
+                         ) -> Callable[[], Tuple[BlockAPI, Tuple[BlockAPI, ...], Tuple[BlockAPI, ...]]]:  # noqa: E501
     """
     Get an argument-free function that will import the given block.
     """
-    def _import_block() -> None:
+    def _import_block() -> Tuple[BlockAPI, Tuple[BlockAPI, ...], Tuple[BlockAPI, ...]]:
         t = Timer()
         beam_chain.clear_first_vm()
         reorg_info = beam_chain.import_block(block, perform_validation=True)
@@ -356,7 +404,7 @@ class BlockImportServer(BaseService):
     def __init__(
             self,
             event_bus: EndpointAPI,
-            beam_chain: AsyncChainAPI,
+            beam_chain: BeamChain,
             token: CancelToken=None) -> None:
         super().__init__(token=token)
         self._event_bus = event_bus
@@ -369,7 +417,7 @@ class BlockImportServer(BaseService):
     async def serve(
             self,
             event_bus: EndpointAPI,
-            beam_chain: AsyncChainAPI) -> None:
+            beam_chain: BeamChain) -> None:
         """
         Listen to DoStatelessBlockImport events, and import block when received.
         Reply with StatelessBlockImportDone when import is complete.
@@ -391,18 +439,18 @@ class BlockImportServer(BaseService):
             await import_completion
 
             if self.is_running:
-                _broadcast_import_complete(  # type: ignore
+                _broadcast_import_complete(
                     event_bus,
                     event.block,
                     event.broadcast_config(),
-                    import_completion,
+                    import_completion,  # type: ignore
                 )
             else:
                 break
 
 
 def partial_trigger_missing_state_downloads(
-        beam_chain: AsyncChainAPI,
+        beam_chain: BeamChain,
         header: BlockHeaderAPI,
         transactions: Tuple[SignedTransactionAPI, ...]) -> Callable[[], None]:
     """
@@ -433,7 +481,7 @@ def partial_trigger_missing_state_downloads(
 
 
 def partial_speculative_execute(
-        beam_chain: AsyncChainAPI,
+        beam_chain: BeamChain,
         header: BlockHeaderAPI,
         transactions: Tuple[SignedTransactionAPI, ...]) -> Callable[[], None]:
     """
@@ -451,7 +499,7 @@ def partial_speculative_execute(
         except ValidationError as exc:
             preview_time = t.elapsed
             vm.logger.debug(
-                "Speculative transactions %d failed for %s after %.1fs: %s",
+                "Speculative transactions %s failed for %s after %.1fs: %s",
                 transactions,
                 header,
                 preview_time,
@@ -478,7 +526,7 @@ class BlockPreviewServer(BaseService):
     def __init__(
             self,
             event_bus: EndpointAPI,
-            beam_chain: AsyncChainAPI,
+            beam_chain: BeamChain,
             shard_num: int,
             token: CancelToken=None) -> None:
         super().__init__(token=token)
@@ -499,12 +547,12 @@ class BlockPreviewServer(BaseService):
     async def serve(
             self,
             event_bus: EndpointAPI,
-            beam_chain: AsyncChainAPI) -> None:
+            beam_chain: BeamChain) -> None:
         """
         Listen to DoStatelessBlockPreview events, and execute the transactions to prefill
         all the needed state data.
         """
-        speculative_thread_executor = ThreadPoolExecutor(
+        speculative_thread_executor = futures.ThreadPoolExecutor(
             max_workers=MAX_SPECULATIVE_EXECUTIONS_PER_PROCESS,
             thread_name_prefix="trinity-spec-exec-",
         )

@@ -1,30 +1,28 @@
+import asyncio
 from typing import (
-    Any,
-    cast,
-    Dict,
     Tuple,
 )
 
+from cached_property import cached_property
+
 from lahja import EndpointAPI
 
+from eth_typing import BlockNumber
+
+from eth.constants import GENESIS_BLOCK_NUMBER
 from eth.rlp.headers import BlockHeader
-from eth_utils import encode_hex
 from lahja import (
     BroadcastConfig,
 )
 
-from p2p.abc import CommandAPI, NodeAPI
-from p2p.exceptions import (
-    HandshakeFailure,
-)
-from p2p.disconnect import DisconnectReason
+from p2p.abc import BehaviorAPI, CommandAPI, HandshakerAPI, SessionAPI
+from p2p.exceptions import PeerConnectionLost
 from p2p.protocol import (
     Payload,
 )
 
-from trinity.exceptions import (
-    WrongNetworkFailure,
-    WrongGenesisFailure,
+from trinity._utils.decorators import (
+    async_suppress_exceptions,
 )
 from trinity.protocol.common.peer import (
     BaseChainPeer,
@@ -36,12 +34,13 @@ from trinity.protocol.common.peer_pool_event_bus import (
     BaseProxyPeerPool,
     PeerPoolEventServer,
 )
-from trinity.protocol.common.types import (
+from trinity.protocol.common.typing import (
     BlockBodyBundles,
     NodeDataBundles,
     ReceiptsBundles,
 )
 
+from .api import ETHAPI
 from .commands import (
     GetBlockHeaders,
     GetBlockBodies,
@@ -49,7 +48,6 @@ from .commands import (
     GetNodeData,
     NewBlock,
     NewBlockHashes,
-    Status,
     Transactions,
 )
 from .constants import MAX_HEADERS_FETCH
@@ -71,7 +69,8 @@ from .events import (
     TransactionsEvent,
 )
 from .proto import ETHProtocol, ProxyETHProtocol, ETHHandshakeParams
-from .handlers import ETHExchangeHandler, ProxyETHExchangeHandler
+from .proxy import ProxyETHAPI
+from .handshaker import ETHHandshaker
 
 
 class ETHPeer(BaseChainPeer):
@@ -80,70 +79,12 @@ class ETHPeer(BaseChainPeer):
     supported_sub_protocols = (ETHProtocol,)
     sub_proto: ETHProtocol = None
 
-    _requests: ETHExchangeHandler = None
+    def get_behaviors(self) -> Tuple[BehaviorAPI, ...]:
+        return super().get_behaviors() + (ETHAPI().as_behavior(),)
 
-    def get_extra_stats(self) -> Tuple[str, ...]:
-        stats_pairs = self.requests.get_stats().items()
-        return tuple(
-            f"{cmd_name}: {stats}" for cmd_name, stats in stats_pairs
-        )
-
-    @property
-    def requests(self) -> ETHExchangeHandler:
-        if self._requests is None:
-            self._requests = ETHExchangeHandler(self)
-        return self._requests
-
-    def handle_sub_proto_msg(self, cmd: CommandAPI, msg: Payload) -> None:
-        if isinstance(cmd, NewBlock):
-            msg = cast(Dict[str, Any], msg)
-            header, _, _ = msg['block']
-            actual_head = header.parent_hash
-            actual_td = msg['total_difficulty'] - header.difficulty
-            if actual_td > self.head_td:
-                self.head_hash = actual_head
-                self.head_td = actual_td
-
-        super().handle_sub_proto_msg(cmd, msg)
-
-    async def send_sub_proto_handshake(self) -> None:
-        chain_info = await self._local_chain_info
-        handshake_params = ETHHandshakeParams(
-            version=self.sub_proto.version,
-            head_hash=chain_info.block_hash,
-            genesis_hash=chain_info.genesis_hash,
-            total_difficulty=chain_info.total_difficulty,
-            network_id=chain_info.network_id,
-        )
-        self.sub_proto.send_handshake(handshake_params)
-
-    async def process_sub_proto_handshake(
-            self, cmd: CommandAPI, msg: Payload) -> None:
-        if not isinstance(cmd, Status):
-            await self.disconnect(DisconnectReason.subprotocol_error)
-            raise HandshakeFailure(f"Expected a ETH Status msg, got {cmd}, disconnecting")
-
-        msg = cast(Dict[str, Any], msg)
-
-        self.head_td = msg['td']
-        self.head_hash = msg['best_hash']
-        self.network_id = msg['network_id']
-        self.genesis_hash = msg['genesis_hash']
-
-        if msg['network_id'] != self.local_network_id:
-            await self.disconnect(DisconnectReason.useless_peer)
-            raise WrongNetworkFailure(
-                f"{self} network ({msg['network_id']}) does not match ours "
-                f"({self.local_network_id}), disconnecting"
-            )
-
-        local_genesis_hash = await self._get_local_genesis_hash()
-        if msg['genesis_hash'] != local_genesis_hash:
-            await self.disconnect(DisconnectReason.useless_peer)
-            raise WrongGenesisFailure(
-                f"{self} genesis ({encode_hex(msg['genesis_hash'])}) does not "
-                f"match ours ({local_genesis_hash}), disconnecting"
-            )
+    @cached_property
+    def eth_api(self) -> ETHAPI:
+        return self.connection.get_logic(ETHAPI.name, ETHAPI)
 
 
 class ETHProxyPeer(BaseProxyPeer):
@@ -154,31 +95,55 @@ class ETHProxyPeer(BaseProxyPeer):
     """
 
     def __init__(self,
-                 remote: NodeAPI,
+                 session: SessionAPI,
                  event_bus: EndpointAPI,
                  sub_proto: ProxyETHProtocol,
-                 requests: ProxyETHExchangeHandler):
+                 eth_api: ProxyETHAPI):
 
-        super().__init__(remote, event_bus)
+        super().__init__(session, event_bus)
 
         self.sub_proto = sub_proto
-        self.requests = requests
+        self.eth_api = eth_api
 
     @classmethod
-    def from_node(cls,
-                  remote: NodeAPI,
-                  event_bus: EndpointAPI,
-                  broadcast_config: BroadcastConfig) -> 'ETHProxyPeer':
+    def from_session(cls,
+                     session: SessionAPI,
+                     event_bus: EndpointAPI,
+                     broadcast_config: BroadcastConfig) -> 'ETHProxyPeer':
         return cls(
-            remote,
+            session,
             event_bus,
-            ProxyETHProtocol(remote, event_bus, broadcast_config),
-            ProxyETHExchangeHandler(remote, event_bus, broadcast_config)
+            ProxyETHProtocol(session, event_bus, broadcast_config),
+            ProxyETHAPI(session, event_bus, broadcast_config)
         )
 
 
 class ETHPeerFactory(BaseChainPeerFactory):
     peer_class = ETHPeer
+
+    async def get_handshakers(self) -> Tuple[HandshakerAPI, ...]:
+        headerdb = self.context.headerdb
+        wait = self.cancel_token.cancellable_wait
+
+        head = await wait(headerdb.coro_get_canonical_head())
+        total_difficulty = await wait(headerdb.coro_get_score(head.hash))
+        genesis_hash = await wait(
+            headerdb.coro_get_canonical_block_hash(BlockNumber(GENESIS_BLOCK_NUMBER))
+        )
+
+        handshake_params = ETHHandshakeParams(
+            head_hash=head.hash,
+            total_difficulty=total_difficulty,
+            genesis_hash=genesis_hash,
+            network_id=self.context.network_id,
+            version=ETHProtocol.version,
+        )
+        return (
+            ETHHandshaker(handshake_params),
+        )
+
+
+async_fire_and_forget = async_suppress_exceptions(PeerConnectionLost, asyncio.TimeoutError)  # type: ignore  # noqa: E501
 
 
 class ETHPeerPoolEventServer(PeerPoolEventServer[ETHPeer]):
@@ -198,34 +163,10 @@ class ETHPeerPoolEventServer(PeerPoolEventServer[ETHPeer]):
 
     async def _run(self) -> None:
 
-        self.run_daemon_event(
-            SendBlockHeadersEvent,
-            lambda event: self.try_with_node(
-                event.remote,
-                lambda peer: peer.sub_proto.send_block_headers(event.headers)
-            )
-        )
-        self.run_daemon_event(
-            SendBlockBodiesEvent,
-            lambda event: self.try_with_node(
-                event.remote,
-                lambda peer: peer.sub_proto.send_block_bodies(event.blocks)
-            )
-        )
-        self.run_daemon_event(
-            SendNodeDataEvent,
-            lambda event: self.try_with_node(
-                event.remote,
-                lambda peer: peer.sub_proto.send_node_data(event.nodes)
-            )
-        )
-        self.run_daemon_event(
-            SendReceiptsEvent,
-            lambda event: self.try_with_node(
-                event.remote,
-                lambda peer: peer.sub_proto.send_receipts(event.receipts)
-            )
-        )
+        self.run_daemon_event(SendBlockHeadersEvent, self.handle_block_headers_event)
+        self.run_daemon_event(SendBlockBodiesEvent, self.handle_block_bodies_event)
+        self.run_daemon_event(SendNodeDataEvent, self.handle_node_data_event)
+        self.run_daemon_event(SendReceiptsEvent, self.handle_receipts_event)
 
         self.run_daemon_request(GetBlockHeadersRequest, self.handle_get_block_headers_request)
         self.run_daemon_request(GetReceiptsRequest, self.handle_get_receipts_request)
@@ -234,11 +175,39 @@ class ETHPeerPoolEventServer(PeerPoolEventServer[ETHPeer]):
 
         await super()._run()
 
+    @async_fire_and_forget
+    async def handle_block_headers_event(self, event: SendBlockHeadersEvent) -> None:
+        await self.try_with_session(
+            event.session,
+            lambda peer: peer.sub_proto.send_block_headers(event.headers)
+        )
+
+    @async_fire_and_forget
+    async def handle_block_bodies_event(self, event: SendBlockBodiesEvent) -> None:
+        await self.try_with_session(
+            event.session,
+            lambda peer: peer.sub_proto.send_block_bodies(event.blocks)
+        )
+
+    @async_fire_and_forget
+    async def handle_node_data_event(self, event: SendNodeDataEvent) -> None:
+        await self.try_with_session(
+            event.session,
+            lambda peer: peer.sub_proto.send_node_data(event.nodes)
+        )
+
+    @async_fire_and_forget
+    async def handle_receipts_event(self, event: SendReceiptsEvent) -> None:
+        await self.try_with_session(
+            event.session,
+            lambda peer: peer.sub_proto.send_receipts(event.receipts)
+        )
+
     async def handle_get_block_headers_request(
             self,
             event: GetBlockHeadersRequest) -> Tuple[BlockHeader, ...]:
-        peer = self.get_peer(event.remote)
-        return await peer.requests.get_block_headers(
+        peer = self.get_peer(event.session)
+        return await peer.eth_api.get_block_headers(
             event.block_number_or_hash,
             event.max_headers,
             skip=event.skip,
@@ -250,46 +219,46 @@ class ETHPeerPoolEventServer(PeerPoolEventServer[ETHPeer]):
                                           event: GetReceiptsRequest) -> ReceiptsBundles:
 
         return await self.with_node_and_timeout(
-            event.remote,
+            event.session,
             event.timeout,
-            lambda peer: peer.requests.get_receipts(event.headers)
+            lambda peer: peer.eth_api.get_receipts(event.headers)
         )
 
     async def handle_get_block_bodies_request(self,
                                               event: GetBlockBodiesRequest) -> BlockBodyBundles:
         return await self.with_node_and_timeout(
-            event.remote,
+            event.session,
             event.timeout,
-            lambda peer: peer.requests.get_block_bodies(event.headers)
+            lambda peer: peer.eth_api.get_block_bodies(event.headers)
         )
 
     async def handle_get_node_data_request(self,
                                            event: GetNodeDataRequest) -> NodeDataBundles:
         return await self.with_node_and_timeout(
-            event.remote,
+            event.session,
             event.timeout,
-            lambda peer: peer.requests.get_node_data(event.node_hashes)
+            lambda peer: peer.eth_api.get_node_data(event.node_hashes)
         )
 
     async def handle_native_peer_message(self,
-                                         remote: NodeAPI,
+                                         session: SessionAPI,
                                          cmd: CommandAPI,
                                          msg: Payload) -> None:
 
         if isinstance(cmd, GetBlockHeaders):
-            await self.event_bus.broadcast(GetBlockHeadersEvent(remote, cmd, msg))
+            await self.event_bus.broadcast(GetBlockHeadersEvent(session, cmd, msg))
         elif isinstance(cmd, GetBlockBodies):
-            await self.event_bus.broadcast(GetBlockBodiesEvent(remote, cmd, msg))
+            await self.event_bus.broadcast(GetBlockBodiesEvent(session, cmd, msg))
         elif isinstance(cmd, GetReceipts):
-            await self.event_bus.broadcast(GetReceiptsEvent(remote, cmd, msg))
+            await self.event_bus.broadcast(GetReceiptsEvent(session, cmd, msg))
         elif isinstance(cmd, GetNodeData):
-            await self.event_bus.broadcast(GetNodeDataEvent(remote, cmd, msg))
+            await self.event_bus.broadcast(GetNodeDataEvent(session, cmd, msg))
         elif isinstance(cmd, NewBlock):
-            await self.event_bus.broadcast(NewBlockEvent(remote, cmd, msg))
+            await self.event_bus.broadcast(NewBlockEvent(session, cmd, msg))
         elif isinstance(cmd, NewBlockHashes):
-            await self.event_bus.broadcast(NewBlockHashesEvent(remote, cmd, msg))
+            await self.event_bus.broadcast(NewBlockHashesEvent(session, cmd, msg))
         elif isinstance(cmd, Transactions):
-            await self.event_bus.broadcast(TransactionsEvent(remote, cmd, msg))
+            await self.event_bus.broadcast(TransactionsEvent(session, cmd, msg))
         else:
             raise Exception(f"Command {cmd} is not broadcasted")
 
@@ -300,12 +269,12 @@ class ETHPeerPool(BaseChainPeerPool):
 
 class ETHProxyPeerPool(BaseProxyPeerPool[ETHProxyPeer]):
 
-    def convert_node_to_proxy_peer(self,
-                                   remote: NodeAPI,
-                                   event_bus: EndpointAPI,
-                                   broadcast_config: BroadcastConfig) -> ETHProxyPeer:
-        return ETHProxyPeer.from_node(
-            remote,
+    def convert_session_to_proxy_peer(self,
+                                      session: SessionAPI,
+                                      event_bus: EndpointAPI,
+                                      broadcast_config: BroadcastConfig) -> ETHProxyPeer:
+        return ETHProxyPeer.from_session(
+            session,
             self.event_bus,
             self.broadcast_config
         )

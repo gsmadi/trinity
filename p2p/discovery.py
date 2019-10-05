@@ -8,7 +8,6 @@ More information at https://github.com/ethereum/devp2p/blob/master/rlpx.md#node-
 import asyncio
 import collections
 import contextlib
-import logging
 import random
 import socket
 import time
@@ -32,6 +31,10 @@ from typing import (
 )
 
 import eth_utils.toolz
+from eth_utils import (
+    ExtendedDebugLogger,
+    get_extended_debug_logger,
+)
 
 from lahja import (
     EndpointAPI,
@@ -57,8 +60,6 @@ from eth_keys import keys
 from eth_keys import datatypes
 
 from eth_hash.auto import keccak
-
-from eth.tools.logging import ExtendedDebugLogger
 
 from cancel_token import CancelToken, OperationCancelled
 
@@ -107,6 +108,10 @@ class WrongMAC(DefectiveMessage):
     pass
 
 
+class UnknownCommand(DefectiveMessage):
+    pass
+
+
 class DiscoveryCommand:
     def __init__(self, name: str, id: int, elem_count: int) -> None:
         self.name = name
@@ -146,8 +151,7 @@ CMD_ID_MAP_V5 = dict(
 
 class DiscoveryProtocol(asyncio.DatagramProtocol):
     """A Kademlia-like protocol to discover RLPx nodes."""
-    logger: ExtendedDebugLogger = cast(ExtendedDebugLogger,
-                                       logging.getLogger("p2p.discovery.DiscoveryProtocol"))
+    logger = get_extended_debug_logger("p2p.discovery.DiscoveryProtocol")
     transport: asyncio.DatagramTransport = None
     use_v5 = False
     _max_neighbours_per_packet_cache = None
@@ -241,7 +245,7 @@ class DiscoveryProtocol(asyncio.DatagramProtocol):
                 got_ping = await self.cancel_token.cancellable_wait(
                     event.wait(), timeout=constants.KADEMLIA_REQUEST_TIMEOUT)
                 self.logger.debug2('got expected ping from %s', remote)
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 self.logger.debug2('timed out waiting for ping from %s', remote)
 
         return got_ping
@@ -268,7 +272,7 @@ class DiscoveryProtocol(asyncio.DatagramProtocol):
                 got_pong = await self.cancel_token.cancellable_wait(
                     event.wait(), timeout=constants.KADEMLIA_REQUEST_TIMEOUT)
                 self.logger.debug2('got expected pong with token %s', encode_hex(token))
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 self.logger.debug2(
                     'timed out waiting for pong from %s (token == %s)',
                     remote,
@@ -298,7 +302,7 @@ class DiscoveryProtocol(asyncio.DatagramProtocol):
                 await self.cancel_token.cancellable_wait(
                     event.wait(), timeout=constants.KADEMLIA_REQUEST_TIMEOUT)
                 self.logger.debug2('got expected neighbours response from %s', remote)
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 self.logger.debug2(
                     'timed out waiting for %d neighbours from %s',
                     constants.KADEMLIA_BUCKET_SIZE,
@@ -420,7 +424,7 @@ class DiscoveryProtocol(asyncio.DatagramProtocol):
             pubkey_head = pubkey[:16]
             pubkey_tail = pubkey[-8:]
             self.logger.debug("full-bootnode: %s", uri)
-            self.logger.info("bootnode: %s...%s@%s", pubkey_head, pubkey_tail, uri_tail)
+            self.logger.debug("bootnode: %s...%s@%s", pubkey_head, pubkey_tail, uri_tail)
 
         try:
             bonding_queries = (
@@ -441,7 +445,7 @@ class DiscoveryProtocol(asyncio.DatagramProtocol):
         ip_address, udp_port = addr
         address = Address(ip_address, udp_port)
         # The prefix below is what geth uses to identify discv5 msgs.
-        # https://github.com/ethereum/go-ethereum/blob/c4712bf96bc1bae4a5ad4600e9719e4a74bde7d5/p2p/discv5/udp.go#L149  # noqa: E501
+        # https://github.com/ethereum/go-ethereum/blob/c4712bf96bc1bae4a5ad4600e9719e4a74bde7d5/p2p/discv5/udp.go#L149
         if text_if_str(to_bytes, data).startswith(V5_ID_STRING):
             self.receive_v5(address, cast(bytes, data))
         else:
@@ -811,7 +815,7 @@ class DiscoveryProtocol(asyncio.DatagramProtocol):
             try:
                 await self.cancel_token.cancellable_wait(
                     event.wait(), timeout=constants.KADEMLIA_REQUEST_TIMEOUT)
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 # A timeout here just means we didn't get at least MAX_ENTRIES_PER_TOPIC nodes,
                 # but we'll still process the ones we get.
                 self.logger.debug2(
@@ -1258,7 +1262,10 @@ def _unpack_v4(message: bytes) -> Tuple[datatypes.PublicKey, int, Tuple[Any, ...
     signed_data = message[HEAD_SIZE:]
     remote_pubkey = signature.recover_public_key_from_msg(signed_data)
     cmd_id = message[HEAD_SIZE]
-    cmd = CMD_ID_MAP[cmd_id]
+    try:
+        cmd = CMD_ID_MAP[cmd_id]
+    except KeyError as e:
+        raise UnknownCommand(f"Invalid Command ID {cmd_id}") from e
     payload = tuple(rlp.decode(message[HEAD_SIZE + 1:], strict=False))
     # Ignore excessive list elements as required by EIP-8.
     payload = payload[:cmd.elem_count]

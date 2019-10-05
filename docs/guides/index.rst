@@ -8,5 +8,7 @@ This section aims to provide hands-on guides to demonstrate how to use Trinity. 
    :name: toc-trinity-guides
 
    quickstart
+   running_trinity_on_dappnode
    architecture
-   writing_plugins
+   creating_a_custom_testnet
+   writing_components

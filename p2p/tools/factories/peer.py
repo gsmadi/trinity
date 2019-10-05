@@ -16,7 +16,7 @@ from p2p.service import run_service
 from p2p.tools.paragon import ParagonPeer, ParagonContext, ParagonPeerFactory
 
 from .cancel_token import CancelTokenFactory
-from .transport import MemoryTransportPairFactory
+from .connection import ConnectionPairFactory
 
 
 @asynccontextmanager
@@ -36,9 +36,11 @@ async def PeerPairFactory(*,
                           cancel_token: CancelToken = None,
                           event_bus: EndpointAPI = None,
                           ) -> AsyncIterator[Tuple[BasePeer, BasePeer]]:
+    # Setup a cancel token for the two peers.
     if cancel_token is None:
         cancel_token = CancelTokenFactory()
 
+    # Setup their PeerFactory instances.
     alice_factory = alice_peer_factory_class(
         privkey=alice_private_key,
         context=alice_peer_context,
@@ -52,31 +54,30 @@ async def PeerPairFactory(*,
         event_bus=event_bus,
     )
 
-    # start: ConnectionPairFactory
+    alice_handshakers = await alice_factory.get_handshakers()
+    bob_handshakers = await bob_factory.get_handshakers()
 
-    alice_transport, bob_transport = MemoryTransportPairFactory(
+    connection_pair = ConnectionPairFactory(
+        alice_handshakers=alice_handshakers,
+        bob_handshakers=bob_handshakers,
         alice_remote=alice_remote,
         alice_private_key=alice_private_key,
+        alice_client_version=alice_client_version,
+        alice_p2p_version=alice_p2p_version,
         bob_remote=bob_remote,
         bob_private_key=bob_private_key,
+        bob_client_version=bob_client_version,
+        bob_p2p_version=bob_p2p_version,
+        cancel_token=cancel_token,
     )
+    async with connection_pair as (alice_connection, bob_connection):
+        alice = alice_factory.create_peer(connection=alice_connection)
+        bob = bob_factory.create_peer(connection=bob_connection)
 
-    # end: ConnectionPairFactory
-
-    alice = alice_factory.create_peer(transport=alice_transport, inbound=False)
-    bob = bob_factory.create_peer(transport=bob_transport, inbound=True)
-
-    async def do_handshake(peer: BasePeer) -> None:
-        await peer.do_p2p_handshake()
-        await peer.do_sub_proto_handshake()
-
-    await asyncio.wait_for(asyncio.gather(
-        do_handshake(alice),
-        do_handshake(bob),
-    ), timeout=1)
-
-    async with run_service(alice), run_service(bob):
-        yield alice, bob
+        async with run_service(alice), run_service(bob):
+            await asyncio.wait_for(alice.ready.wait(), timeout=1)
+            await asyncio.wait_for(bob.ready.wait(), timeout=1)
+            yield alice, bob
 
 
 def ParagonPeerPairFactory(*,

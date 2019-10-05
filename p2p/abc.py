@@ -1,29 +1,40 @@
 from abc import ABC, abstractmethod
+import asyncio
 from typing import (
     Any,
     AsyncContextManager,
     AsyncIterator,
+    Awaitable,
+    Callable,
     ClassVar,
+    ContextManager,
     Dict,
     Generic,
+    Hashable,
     List,
+    Optional,
     Tuple,
     Type,
     TYPE_CHECKING,
     TypeVar,
     Union,
 )
+import uuid
 
 
 from rlp import sedes
 
 from cancel_token import CancelToken
 
-from eth_keys import datatypes
+from eth_utils import ExtendedDebugLogger
 
-from p2p.typing import Capability, Payload, Structure
+from eth_keys import keys
+
+from p2p.typing import Capability, Capabilities, Payload, Structure, TRequestPayload
+from p2p.transport_state import TransportState
 
 if TYPE_CHECKING:
+    from p2p.handshake import DevP2PReceipt  # noqa: F401
     from p2p.p2p_proto import (  # noqa: F401
         BaseP2PProtocol,
     )
@@ -86,12 +97,12 @@ TNode = TypeVar('TNode', bound='NodeAPI')
 
 
 class NodeAPI(ABC):
-    pubkey: datatypes.PublicKey
+    pubkey: keys.PublicKey
     address: AddressAPI
     id: int
 
     @abstractmethod
-    def __init__(self, pubkey: datatypes.PublicKey, address: AddressAPI) -> None:
+    def __init__(self, pubkey: keys.PublicKey, address: AddressAPI) -> None:
         ...
 
     @classmethod
@@ -124,6 +135,11 @@ class NodeAPI(ABC):
     @abstractmethod
     def __hash__(self) -> int:
         ...
+
+
+class SessionAPI(ABC, Hashable):
+    id: uuid.UUID
+    remote: NodeAPI
 
 
 class CommandAPI(ABC):
@@ -167,10 +183,6 @@ class CommandAPI(ABC):
         ...
 
 
-# A payload to be delivered with a request
-TRequestPayload = TypeVar('TRequestPayload', bound=Payload, covariant=True)
-
-
 class RequestAPI(ABC, Generic[TRequestPayload]):
     """
     Must define command_payload during init. This is the data that will
@@ -187,7 +199,9 @@ class RequestAPI(ABC, Generic[TRequestPayload]):
 
 
 class TransportAPI(ABC):
+    session: SessionAPI
     remote: NodeAPI
+    read_state: TransportState
 
     @property
     @abstractmethod
@@ -196,7 +210,7 @@ class TransportAPI(ABC):
 
     @property
     @abstractmethod
-    def public_key(self) -> datatypes.PublicKey:
+    def public_key(self) -> keys.PublicKey:
         ...
 
     @abstractmethod
@@ -241,8 +255,9 @@ class ProtocolAPI(ABC):
     def send_request(self, request: RequestAPI[Payload]) -> None:
         ...
 
+    @classmethod
     @abstractmethod
-    def supports_command(self, cmd_type: Type[CommandAPI]) -> bool:
+    def supports_command(cls, cmd_type: Type[CommandAPI]) -> bool:
         ...
 
     @classmethod
@@ -272,8 +287,13 @@ class MultiplexerAPI(ABC):
         ...
 
     #
-    # Proxy Transport methods
+    # Proxy Transport properties and methods
     #
+    @property
+    @abstractmethod
+    def session(self) -> SessionAPI:
+        ...
+
     @property
     @abstractmethod
     def remote(self) -> NodeAPI:
@@ -307,6 +327,10 @@ class MultiplexerAPI(ABC):
     def get_protocols(self) -> Tuple[ProtocolAPI, ...]:
         ...
 
+    @abstractmethod
+    def get_protocol_for_command_type(self, command_type: Type[CommandAPI]) -> ProtocolAPI:
+        ...
+
     #
     # Streaming API
     #
@@ -320,4 +344,267 @@ class MultiplexerAPI(ABC):
     # Message reading and streaming API
     #
     def multiplex(self) -> AsyncContextManager[None]:
+        ...
+
+
+class ServiceEventsAPI(ABC):
+    started: asyncio.Event
+    stopped: asyncio.Event
+    cleaned_up: asyncio.Event
+    cancelled: asyncio.Event
+    finished: asyncio.Event
+
+
+TReturn = TypeVar('TReturn')
+
+
+class AsyncioServiceAPI(ABC):
+    events: ServiceEventsAPI
+    cancel_token: CancelToken
+
+    @property
+    @abstractmethod
+    def logger(self) -> ExtendedDebugLogger:
+        ...
+
+    @abstractmethod
+    def cancel_nowait(self) -> None:
+        ...
+
+    @property
+    @abstractmethod
+    def is_cancelled(self) -> bool:
+        ...
+
+    @property
+    @abstractmethod
+    def is_running(self) -> bool:
+        ...
+
+    @property
+    @abstractmethod
+    def is_operational(self) -> bool:
+        ...
+
+    @abstractmethod
+    async def run(
+            self,
+            finished_callback: Optional[Callable[['AsyncioServiceAPI'], None]] = None) -> None:
+        ...
+
+    @abstractmethod
+    async def cancel(self) -> None:
+        ...
+
+    @abstractmethod
+    def run_daemon(self, service: 'AsyncioServiceAPI') -> None:
+        ...
+
+    @abstractmethod
+    async def wait(self,
+                   awaitable: Awaitable[TReturn],
+                   token: CancelToken = None,
+                   timeout: float = None) -> TReturn:
+        ...
+
+
+class HandshakeReceiptAPI(ABC):
+    protocol: ProtocolAPI
+
+
+THandshakeReceipt = TypeVar('THandshakeReceipt', bound=HandshakeReceiptAPI)
+
+
+class HandshakerAPI(ABC):
+    logger: ExtendedDebugLogger
+
+    protocol_class: Type[ProtocolAPI]
+
+    @abstractmethod
+    async def do_handshake(self,
+                           multiplexer: MultiplexerAPI,
+                           protocol: ProtocolAPI) -> HandshakeReceiptAPI:
+        """
+        Perform the actual handshake for the protocol.
+        """
+        ...
+
+
+QualifierFn = Callable[['ConnectionAPI', 'LogicAPI'], bool]
+
+
+class LogicAPI(ABC):
+    @abstractmethod
+    def as_behavior(self, qualifier: QualifierFn = None) -> 'BehaviorAPI':
+        ...
+
+    @abstractmethod
+    def apply(self, connection: 'ConnectionAPI') -> AsyncContextManager[None]:
+        ...
+
+
+TLogic = TypeVar('TLogic', bound=LogicAPI)
+
+
+class BehaviorAPI(ABC):
+    qualifier: QualifierFn
+    logic: Any
+
+    @abstractmethod
+    def should_apply_to(self, connection: 'ConnectionAPI') -> bool:
+        ...
+
+    @abstractmethod
+    def apply(self, connection: 'ConnectionAPI') -> AsyncContextManager[None]:
+        """
+        Context manager API used programatically by the `ContextManager` to
+        apply the behavior to the connection during the lifecycle of the
+        connection.
+        """
+        ...
+
+
+TBehavior = TypeVar('TBehavior', bound=BehaviorAPI)
+
+
+class SubscriptionAPI(ContextManager['SubscriptionAPI']):
+    @abstractmethod
+    def cancel(self) -> None:
+        ...
+
+
+ProtocolHandlerFn = Callable[['ConnectionAPI', CommandAPI, Payload], Awaitable[Any]]
+CommandHandlerFn = Callable[['ConnectionAPI', Payload], Awaitable[Any]]
+
+
+class ConnectionAPI(AsyncioServiceAPI):
+    protocol_receipts: Tuple[HandshakeReceiptAPI, ...]
+
+    #
+    # Primary properties of the connection
+    #
+    is_dial_out: bool
+
+    @property
+    @abstractmethod
+    def is_dial_in(self) -> bool:
+        ...
+
+    @property
+    @abstractmethod
+    def session(self) -> SessionAPI:
+        ...
+
+    @property
+    @abstractmethod
+    def remote(self) -> NodeAPI:
+        ...
+
+    @property
+    @abstractmethod
+    def is_closing(self) -> bool:
+        ...
+
+    #
+    # Subscriptions/Handler API
+    #
+    @abstractmethod
+    def start_protocol_streams(self) -> None:
+        ...
+
+    @abstractmethod
+    def add_protocol_handler(self,
+                             protocol_type: Type[ProtocolAPI],
+                             handler_fn: ProtocolHandlerFn,
+                             ) -> SubscriptionAPI:
+        ...
+
+    @abstractmethod
+    def add_command_handler(self,
+                            command_type: Type[CommandAPI],
+                            handler_fn: CommandHandlerFn,
+                            ) -> SubscriptionAPI:
+        ...
+
+    #
+    # Behavior API
+    #
+    @abstractmethod
+    def add_logic(self, name: str, logic: LogicAPI) -> SubscriptionAPI:
+        ...
+
+    @abstractmethod
+    def remove_logic(self, name: str) -> None:
+        ...
+
+    @abstractmethod
+    def has_logic(self, name: str) -> bool:
+        ...
+
+    @abstractmethod
+    def get_logic(self, name: str, logic_type: Type[TLogic]) -> TLogic:
+        ...
+
+    #
+    # Access to underlying Multiplexer
+    #
+    @abstractmethod
+    def get_multiplexer(self) -> MultiplexerAPI:
+        ...
+
+    #
+    # Base Protocol shortcuts
+    #
+    @abstractmethod
+    def get_base_protocol(self) -> 'BaseP2PProtocol':
+        ...
+
+    @abstractmethod
+    def get_p2p_receipt(self) -> 'DevP2PReceipt':
+        ...
+
+    #
+    # Protocol APIS
+    #
+    @abstractmethod
+    def has_protocol(self, protocol_identifier: Union[ProtocolAPI, Type[ProtocolAPI]]) -> bool:
+        ...
+
+    @abstractmethod
+    def get_protocols(self) -> Tuple[ProtocolAPI, ...]:
+        ...
+
+    @abstractmethod
+    def get_protocol_by_type(self, protocol_type: Type[TProtocol]) -> TProtocol:
+        ...
+
+    @abstractmethod
+    def get_protocol_for_command_type(self, command_type: Type[CommandAPI]) -> ProtocolAPI:
+        ...
+
+    @abstractmethod
+    def get_receipt_by_type(self, receipt_type: Type[THandshakeReceipt]) -> THandshakeReceipt:
+        ...
+
+    #
+    # Connection Metadata
+    #
+    @property
+    @abstractmethod
+    def remote_capabilities(self) -> Capabilities:
+        ...
+
+    @property
+    @abstractmethod
+    def remote_p2p_version(self) -> int:
+        ...
+
+    @property
+    @abstractmethod
+    def client_version_string(self) -> str:
+        ...
+
+    @property
+    @abstractmethod
+    def safe_client_version_string(self) -> str:
         ...

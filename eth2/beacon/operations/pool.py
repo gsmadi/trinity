@@ -1,17 +1,15 @@
 from typing import Dict, Generic, Iterator, Tuple, TypeVar
+
 from typing_extensions import Protocol
 
-from eth_typing import Hash32
-
-
-HashTreeRoot = Hash32
+from eth2.beacon.typing import HashTreeRoot
 
 
 class Operation(Protocol):
     hash_tree_root: HashTreeRoot
 
 
-T = TypeVar('T', bound='Operation')
+T = TypeVar("T", bound="Operation")
 
 
 class OperationPool(Generic[T]):

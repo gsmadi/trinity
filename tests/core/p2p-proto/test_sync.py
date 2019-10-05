@@ -1,9 +1,11 @@
 import asyncio
+import logging
 import uuid
 
 from eth.db.atomic import AtomicDB
 from eth.exceptions import HeaderNotFound
 from eth.vm.forks.petersburg import PetersburgVM
+from eth_utils import decode_hex
 from lahja import ConnectionConfig, AsyncioEndpoint
 from p2p.service import BaseService
 import pytest
@@ -16,6 +18,7 @@ from trinity.sync.beam.importer import (
 )
 from trinity.protocol.eth.sync import ETHHeaderChainSyncer
 from trinity.protocol.les.servers import LightRequestServer
+from trinity.sync.common.checkpoint import Checkpoint
 from trinity.sync.common.chain import (
     SimpleBlockImporter,
 )
@@ -25,7 +28,6 @@ from trinity.protocol.les.peer import (
     LESPeerPoolEventServer,
 )
 
-from trinity.sync.full.state import StateDownloader
 from trinity.sync.beam.chain import (
     BeamSyncer,
 )
@@ -64,51 +66,6 @@ def small_header_batches(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fast_syncer(request,
-                           event_bus,
-                           event_loop,
-                           chaindb_fresh,
-                           chaindb_20):
-    client_context = ChainContextFactory(headerdb__db=chaindb_fresh.db)
-    server_context = ChainContextFactory(headerdb__db=chaindb_20.db)
-    peer_pair = ETHPeerPairFactory(
-        alice_peer_context=client_context,
-        bob_peer_context=server_context,
-        event_bus=event_bus,
-    )
-    async with peer_pair as (client_peer, server_peer):
-
-        client_peer_pool = MockPeerPoolWithConnectedPeers([client_peer])
-        client = FastChainSyncer(LatestTestChain(chaindb_fresh.db), chaindb_fresh, client_peer_pool)
-        server_peer_pool = MockPeerPoolWithConnectedPeers([server_peer], event_bus=event_bus)
-
-        async with run_peer_pool_event_server(
-            event_bus,
-            server_peer_pool,
-            handler_type=ETHPeerPoolEventServer,
-        ), run_request_server(
-            event_bus,
-            AsyncChainDB(chaindb_20.db),
-        ):
-
-            server_peer.logger.info("%s is serving 20 blocks", server_peer)
-            client_peer.logger.info("%s is syncing up 20", client_peer)
-
-            # FastChainSyncer.run() will return as soon as it's caught up with the peer.
-            await asyncio.wait_for(client.run(), timeout=5)
-
-            head = chaindb_fresh.get_canonical_head()
-            assert head == chaindb_20.get_canonical_head()
-
-            # Now download the state for the chain's head.
-            state_downloader = StateDownloader(
-                chaindb_fresh, chaindb_fresh.db, head.state_root, client_peer_pool)
-            await asyncio.wait_for(state_downloader.run(), timeout=5)
-
-            assert head.state_root in chaindb_fresh.db
-
-
-@pytest.mark.asyncio
 async def test_skeleton_syncer(request, event_loop, event_bus, chaindb_fresh, chaindb_1000):
 
     client_context = ChainContextFactory(headerdb__db=chaindb_fresh.db)
@@ -138,12 +95,60 @@ async def test_skeleton_syncer(request, event_loop, event_bus, chaindb_fresh, ch
             head = chaindb_fresh.get_canonical_head()
             assert head == chaindb_1000.get_canonical_head()
 
-            # Now download the state for the chain's head.
-            state_downloader = StateDownloader(
-                chaindb_fresh, chaindb_fresh.db, head.state_root, client_peer_pool)
-            await asyncio.wait_for(state_downloader.run(), timeout=20)
 
-            assert head.state_root in chaindb_fresh.db
+@pytest.mark.asyncio
+async def test_beam_syncer_with_checkpoint_too_close_to_tip(
+        caplog,
+        request,
+        event_loop,
+        event_bus,
+        chaindb_fresh,
+        chaindb_churner):
+
+    checkpoint = Checkpoint(
+        block_hash=decode_hex('0x814aca8a5855f216fee0f627945f70b3c019ae2c8b3aeb528ea7049ed83cfc82'),
+        score=645,
+    )
+
+    caplog.set_level(logging.INFO)
+    try:
+        await test_beam_syncer(
+            request,
+            event_loop,
+            event_bus,
+            chaindb_fresh,
+            chaindb_churner,
+            beam_to_block=66,
+            checkpoint=checkpoint,
+        )
+    except asyncio.TimeoutError as e:
+        # Beam syncer timing out and printing an info to the user is the expected behavior.
+        # Our checkpoint is right before the tip and the chain doesn't advance forward.
+        assert "Checkpoint is too near" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_beam_syncer_with_checkpoint(
+        request,
+        event_loop,
+        event_bus,
+        chaindb_fresh,
+        chaindb_churner):
+
+    checkpoint = Checkpoint(
+        block_hash=decode_hex('0x5b8d32e4aebda3da7bdf2f0588cb42256e2ed0c268efec71b38278df8488a263'),
+        score=55,
+    )
+
+    await test_beam_syncer(
+        request,
+        event_loop,
+        event_bus,
+        chaindb_fresh,
+        chaindb_churner,
+        beam_to_block=66,
+        checkpoint=checkpoint,
+    )
 
 
 # Identified tricky scenarios:
@@ -163,7 +168,8 @@ async def test_beam_syncer(
         event_bus,
         chaindb_fresh,
         chaindb_churner,
-        beam_to_block):
+        beam_to_block,
+        checkpoint=None):
 
     client_context = ChainContextFactory(headerdb__db=chaindb_fresh.db)
     server_context = ChainContextFactory(headerdb__db=chaindb_churner.db)
@@ -209,7 +215,8 @@ async def test_beam_syncer(
                 AsyncChainDB(chaindb_fresh.db),
                 client_peer_pool,
                 gatherer_endpoint,
-                beam_to_block,
+                force_beam_block_number=beam_to_block,
+                checkpoint=checkpoint,
             )
 
             client_peer.logger.info("%s is serving churner blocks", client_peer)
@@ -311,7 +318,7 @@ class FallbackTesting_RegularChainSyncer(BaseService):
     def __init__(self, chain, db, peer_pool, token=None) -> None:
         super().__init__(token=token)
         self._chain = chain
-        self._header_syncer = ETHHeaderChainSyncer(chain, db, peer_pool, self.cancel_token)
+        self._header_syncer = ETHHeaderChainSyncer(chain, db, peer_pool, token=self.cancel_token)
         self._single_header_syncer = self.HeaderSyncer_OnlyOne(self._header_syncer)
         self._paused_header_syncer = self.HeaderSyncer_PauseThenRest(self._header_syncer)
         self._draining_syncer = RegularChainBodySyncer(

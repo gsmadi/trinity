@@ -2,32 +2,33 @@ from dataclasses import (
     dataclass,
 )
 from typing import (
-    List,
-    Tuple,
+    Sequence,
     Type,
 )
 
-from eth.rlp.blocks import BaseBlock
-from eth.rlp.headers import BlockHeader
-from eth.rlp.receipts import Receipt
-from eth.rlp.transactions import BaseTransactionFields
+from eth.abc import (
+    BlockAPI,
+    BlockHeaderAPI,
+    ReceiptAPI,
+    SignedTransactionAPI,
+)
 
 from lahja import (
     BaseEvent,
     BaseRequestResponseEvent,
 )
 
-from p2p.abc import NodeAPI
-
 from eth_typing import (
     BlockIdentifier,
     Hash32,
 )
 
+from p2p.abc import SessionAPI
+
 from trinity.protocol.common.events import (
     PeerPoolMessageEvent,
 )
-from trinity.protocol.common.types import (
+from trinity.protocol.common.typing import (
     BlockBodyBundles,
     NodeDataBundles,
     ReceiptsBundles,
@@ -100,8 +101,8 @@ class SendBlockHeadersEvent(BaseEvent):
     Event to proxy a ``ETHPeer.sub_proto.send_block_headers`` call from a proxy peer to the actual
     peer that sits in the peer pool.
     """
-    remote: NodeAPI
-    headers: Tuple[BlockHeader, ...]
+    session: SessionAPI
+    headers: Sequence[BlockHeaderAPI]
 
 
 @dataclass
@@ -110,8 +111,8 @@ class SendBlockBodiesEvent(BaseEvent):
     Event to proxy a ``ETHPeer.sub_proto.send_block_bodies`` call from a proxy peer to the actual
     peer that sits in the peer pool.
     """
-    remote: NodeAPI
-    blocks: List[BaseBlock]
+    session: SessionAPI
+    blocks: Sequence[BlockAPI]
 
 
 @dataclass
@@ -120,8 +121,8 @@ class SendNodeDataEvent(BaseEvent):
     Event to proxy a ``ETHPeer.sub_proto.send_node_data`` call from a proxy peer to the actual
     peer that sits in the peer pool.
     """
-    remote: NodeAPI
-    nodes: Tuple[bytes, ...]
+    session: SessionAPI
+    nodes: Sequence[bytes]
 
 
 @dataclass
@@ -130,8 +131,8 @@ class SendReceiptsEvent(BaseEvent):
     Event to proxy a ``ETHPeer.sub_proto.send_receipts`` call from a proxy peer to the actual
     peer that sits in the peer pool.
     """
-    remote: NodeAPI
-    receipts: List[List[Receipt]]
+    session: SessionAPI
+    receipts: Sequence[Sequence[ReceiptAPI]]
 
 
 @dataclass
@@ -140,8 +141,8 @@ class SendTransactionsEvent(BaseEvent):
     Event to proxy a ``ETHPeer.sub_proto.send_transactions`` call from a proxy peer to the actual
     peer that sits in the peer pool.
     """
-    remote: NodeAPI
-    transactions: List[BaseTransactionFields]
+    session: SessionAPI
+    transactions: Sequence[SignedTransactionAPI]
 
 # EXCHANGE HANDLER REQUEST / RESPONSE PAIRS
 
@@ -149,14 +150,14 @@ class SendTransactionsEvent(BaseEvent):
 @dataclass
 class GetBlockHeadersResponse(BaseEvent):
 
-    headers: Tuple[BlockHeader, ...]
+    headers: Sequence[BlockHeaderAPI]
     error: Exception = None
 
 
 @dataclass
 class GetBlockHeadersRequest(BaseRequestResponseEvent[GetBlockHeadersResponse]):
 
-    remote: NodeAPI
+    session: SessionAPI
     block_number_or_hash: BlockIdentifier
     max_headers: int
     skip: int
@@ -178,8 +179,8 @@ class GetBlockBodiesResponse(BaseEvent):
 @dataclass
 class GetBlockBodiesRequest(BaseRequestResponseEvent[GetBlockBodiesResponse]):
 
-    remote: NodeAPI
-    headers: Tuple[BlockHeader, ...]
+    session: SessionAPI
+    headers: Sequence[BlockHeaderAPI]
     timeout: float
 
     @staticmethod
@@ -197,8 +198,8 @@ class GetNodeDataResponse(BaseEvent):
 @dataclass
 class GetNodeDataRequest(BaseRequestResponseEvent[GetNodeDataResponse]):
 
-    remote: NodeAPI
-    node_hashes: Tuple[Hash32, ...]
+    session: SessionAPI
+    node_hashes: Sequence[Hash32]
     timeout: float
 
     @staticmethod
@@ -216,8 +217,8 @@ class GetReceiptsResponse(BaseEvent):
 @dataclass
 class GetReceiptsRequest(BaseRequestResponseEvent[GetReceiptsResponse]):
 
-    remote: NodeAPI
-    headers: Tuple[BlockHeader, ...]
+    session: SessionAPI
+    headers: Sequence[BlockHeaderAPI]
     timeout: float
 
     @staticmethod

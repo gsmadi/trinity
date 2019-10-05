@@ -1,8 +1,10 @@
 import asyncio
 import logging
 from pathlib import Path
+import shutil
 import socket
 import subprocess
+import tempfile
 import time
 
 import pytest
@@ -47,8 +49,11 @@ async def geth_port(unused_tcp_port):
 
 @pytest.fixture
 def geth_datadir():
-    datadir = Path(__file__).parent / 'fixtures' / 'geth_lightchain_datadir'
-    return datadir.absolute()
+    fixture_datadir = Path(__file__).parent / 'fixtures' / 'geth_lightchain_datadir'
+    with tempfile.TemporaryDirectory() as temp_dir:
+        datadir = Path(temp_dir) / 'geth'
+        shutil.copytree(fixture_datadir, datadir)
+        yield datadir
 
 
 @pytest.fixture
@@ -212,7 +217,7 @@ async def test_lightchain_integration(
 
     assert len(peer_pool) == 1
     peer = peer_pool.highest_td_peer
-    head = await peer_chain.coro_get_block_header_by_hash(peer.head_hash)
+    head = await peer_chain.coro_get_block_header_by_hash(peer.head_info.head_hash)
 
     # In order to answer queries for contract code, geth needs the state trie entry for the block
     # we specify in the query, but because of fast sync we can only assume it has that for recent

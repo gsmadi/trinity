@@ -1,8 +1,13 @@
 from typing import (
     Iterable,
+    Tuple,
 )
 
-from p2p.abc import CommandAPI
+from p2p.abc import HandshakerAPI, MultiplexerAPI
+from p2p.handshake import Handshaker
+from p2p.receipt import HandshakeReceipt
+
+from p2p.abc import ProtocolAPI
 from p2p.constants import DEVP2P_V5
 from p2p.peer import (
     BasePeer,
@@ -10,7 +15,6 @@ from p2p.peer import (
     BasePeerFactory,
 )
 from p2p.peer_pool import BasePeerPool
-from p2p.typing import Payload
 
 from .proto import ParagonProtocol
 
@@ -18,16 +22,6 @@ from .proto import ParagonProtocol
 class ParagonPeer(BasePeer):
     supported_sub_protocols = (ParagonProtocol,)
     sub_proto: ParagonProtocol = None
-
-    async def send_sub_proto_handshake(self) -> None:
-        pass
-
-    async def process_sub_proto_handshake(
-            self, cmd: CommandAPI, msg: Payload) -> None:
-        pass
-
-    async def do_sub_proto_handshake(self) -> None:
-        pass
 
 
 class ParagonContext(BasePeerContext):
@@ -42,9 +36,21 @@ class ParagonContext(BasePeerContext):
         super().__init__(client_version_string, listen_port, p2p_version)
 
 
+class ParagonHandshaker(Handshaker):
+    protocol_class = ParagonProtocol
+
+    async def do_handshake(self,
+                           multiplexer: MultiplexerAPI,
+                           protocol: ProtocolAPI) -> HandshakeReceipt:
+        return HandshakeReceipt(protocol)
+
+
 class ParagonPeerFactory(BasePeerFactory):
     peer_class = ParagonPeer
     context: ParagonContext
+
+    async def get_handshakers(self) -> Tuple[HandshakerAPI, ...]:
+        return (ParagonHandshaker(),)
 
 
 class ParagonPeerPool(BasePeerPool):
@@ -56,7 +62,7 @@ class ParagonMockPeerPoolWithConnectedPeers(ParagonPeerPool):
     def __init__(self, peers: Iterable[ParagonPeer]) -> None:
         super().__init__(privkey=None, context=None)
         for peer in peers:
-            self.connected_nodes[peer.remote] = peer
+            self.connected_nodes[peer.session] = peer
 
     async def _run(self) -> None:
         raise NotImplementedError("This is a mock PeerPool implementation, you must not _run() it")

@@ -2,8 +2,8 @@ from abc import abstractmethod
 from typing import (
     Dict,
     Iterable,
-    List,
     Sequence,
+    Tuple,
     Type,
 )
 
@@ -35,7 +35,10 @@ class BaseAsyncChainDB(BaseAsyncHeaderDB, ChainDB):
         ...
 
     @abstractmethod
-    async def coro_persist_block(self, block: BlockAPI) -> None:
+    async def coro_persist_block(
+        self,
+        block: BlockAPI,
+    ) -> Tuple[Tuple[Hash32, ...], Tuple[Hash32, ...]]:
         ...
 
     @abstractmethod
@@ -54,12 +57,15 @@ class BaseAsyncChainDB(BaseAsyncHeaderDB, ChainDB):
         ...
 
     @abstractmethod
-    async def coro_get_block_uncles(self, uncles_hash: Hash32) -> List[BlockHeaderAPI]:
+    async def coro_get_block_uncles(self, uncles_hash: Hash32) -> Tuple[BlockHeaderAPI, ...]:
         ...
 
     @abstractmethod
     async def coro_get_receipts(
-            self, header: BlockHeaderAPI, receipt_class: Type[ReceiptAPI]) -> List[ReceiptAPI]:
+        self,
+        header: BlockHeaderAPI,
+        receipt_class: Type[ReceiptAPI],
+    ) -> Tuple[ReceiptAPI, ...]:
         ...
 
 
@@ -72,6 +78,7 @@ class AsyncChainDB(BaseAsyncChainDB):
     coro_header_exists = async_method(BaseAsyncChainDB.header_exists)
     coro_get_canonical_block_hash = async_method(BaseAsyncChainDB.get_canonical_block_hash)
     coro_get_canonical_block_header_by_number = async_method(BaseAsyncChainDB.get_canonical_block_header_by_number)  # noqa: E501
+    coro_persist_checkpoint_header = async_method(BaseAsyncChainDB.persist_checkpoint_header)
     coro_persist_header = async_method(BaseAsyncChainDB.persist_header)
     coro_persist_header_chain = async_method(BaseAsyncChainDB.persist_header_chain)
     coro_persist_block = async_method(BaseAsyncChainDB.persist_block)

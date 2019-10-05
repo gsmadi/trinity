@@ -14,18 +14,14 @@ from pathlib import Path
 import sys
 from typing import (
     Any,
-    cast,
     Dict,
     Tuple,
     TYPE_CHECKING,
     Callable,
 )
 
+from eth_utils import get_extended_debug_logger
 from eth_utils.toolz import dissoc
-
-from eth.tools.logging import (
-    ExtendedDebugLogger,
-)
 
 from trinity._utils.shellart import (
     bold_red,
@@ -41,8 +37,8 @@ LOG_MAX_MB = 5
 
 class TrinityLogFormatter(logging.Formatter):
 
-    def __init__(self, fmt: str, datefmt: str) -> None:
-        super().__init__(fmt, datefmt)
+    def __init__(self, fmt: str) -> None:
+        super().__init__(fmt)
 
     def format(self, record: logging.LogRecord) -> str:
         record.shortname = record.name.split('.')[-1]  # type: ignore
@@ -57,21 +53,7 @@ class TrinityLogFormatter(logging.Formatter):
 
 LOG_FORMATTER = TrinityLogFormatter(
     fmt='%(levelname)8s  %(asctime)s  %(shortname)20s  %(message)s',
-    datefmt='%m-%d %H:%M:%S'
 )
-
-
-class HasExtendedDebugLogger:
-    _logger: ExtendedDebugLogger = None
-
-    @property
-    def logger(self) -> ExtendedDebugLogger:
-        if self._logger is None:
-            self._logger = cast(
-                ExtendedDebugLogger,
-                logging.getLogger(self.__module__ + '.' + self.__class__.__name__)
-            )
-        return self._logger
 
 
 def setup_log_levels(log_levels: Dict[str, int]) -> None:
@@ -149,7 +131,7 @@ def setup_queue_logging(log_queue: 'Queue[str]', level: int) -> None:
     queue_handler = QueueHandler(log_queue)
     queue_handler.setLevel(level)
 
-    logger = cast(ExtendedDebugLogger, logging.getLogger())
+    logger = get_extended_debug_logger('')
     logger.addHandler(queue_handler)
     logger.setLevel(level)
 

@@ -8,8 +8,10 @@ try:
 except pkg_resources.DistributionNotFound:
     __version__ = f"eth-{pkg_resources.get_distribution('py-evm').version}"
 
-# This is to ensure we call setup_extended_logging() before anything else.
-import eth as _eth_module  # noqa: F401
+
+# Setup the `DEBUG2` logging level
+from eth_utils import setup_DEBUG2_logging  # noqa: E402
+setup_DEBUG2_logging()
 
 
 def is_uvloop_supported() -> bool:
@@ -18,11 +20,11 @@ def is_uvloop_supported() -> bool:
 
 if is_uvloop_supported():
     # Set `uvloop` as the default event loop
-    import asyncio  # noqa: E402
+    import asyncio
 
     from eth._warnings import catch_and_ignore_import_warning
     with catch_and_ignore_import_warning():
-        import uvloop  # noqa: E402
+        import uvloop
 
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 

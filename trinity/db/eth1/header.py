@@ -53,13 +53,22 @@ class BaseAsyncHeaderDB(HeaderDB):
         ...
 
     @abstractmethod
-    async def coro_persist_header(self, header: BlockHeaderAPI) -> Tuple[BlockHeaderAPI, ...]:
+    async def coro_persist_header(
+        self,
+        header: BlockHeaderAPI,
+    ) -> Tuple[Tuple[BlockHeaderAPI, ...], Tuple[BlockHeaderAPI, ...]]:
         ...
 
     @abstractmethod
-    async def coro_persist_header_chain(self,
-                                        headers: Iterable[BlockHeaderAPI],
-                                        ) -> Tuple[BlockHeaderAPI, ...]:
+    async def coro_persist_checkpoint_header(self, header: BlockHeaderAPI, score: int) -> None:
+        ...
+
+    @abstractmethod
+    async def coro_persist_header_chain(
+        self,
+        headers: Iterable[BlockHeaderAPI],
+        genesis_parent_hash: Hash32=None
+    ) -> Tuple[Tuple[BlockHeaderAPI, ...], Tuple[BlockHeaderAPI, ...]]:
         ...
 
 
@@ -71,5 +80,6 @@ class AsyncHeaderDB(BaseAsyncHeaderDB):
     coro_get_score = async_method(BaseAsyncHeaderDB.get_score)
     coro_header_exists = async_method(BaseAsyncHeaderDB.header_exists)
     coro_get_canonical_block_hash = async_method(BaseAsyncHeaderDB.get_canonical_block_hash)
+    coro_persist_checkpoint_header = async_method(BaseAsyncHeaderDB.persist_checkpoint_header)
     coro_persist_header = async_method(BaseAsyncHeaderDB.persist_header)
     coro_persist_header_chain = async_method(BaseAsyncHeaderDB.persist_header_chain)

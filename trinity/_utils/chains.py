@@ -1,5 +1,6 @@
 import argparse
 import os
+import tempfile
 from pathlib import Path
 from typing import (
     cast,
@@ -121,13 +122,13 @@ class TrinityConfigParams(TypedDict):
     network_id: int
     use_discv5: bool
 
-    trinity_root_dir: Optional[str]
+    trinity_root_dir: Optional[Path]
 
     genesis_config: Optional[Dict[str, Any]]
 
-    data_dir: Optional[str]
+    data_dir: Optional[Path]
 
-    nodekey_path: Optional[str]
+    nodekey_path: Optional[Path]
     nodekey: Optional[PrivateKey]
 
     max_peers: Optional[int]
@@ -142,15 +143,25 @@ def construct_trinity_config_params(
     return cast(TrinityConfigParams, dict(_construct_trinity_config_params(args)))
 
 
+def _random_symbol_of_length(n: int) -> str:
+    import string
+    import random
+    return "".join(random.choice(string.ascii_letters) for _ in range(n))
+
+
 def _construct_trinity_config_params(
-        args: argparse.Namespace) -> Iterable[Tuple[str, Union[int, str, bytes, Tuple[str, ...]]]]:
+        args: argparse.Namespace
+) -> Iterable[Tuple[str, Union[int, str, bytes, Path, Tuple[str, ...]]]]:
     """
     Helper function for constructing the kwargs to initialize a TrinityConfig object.
     """
     yield 'network_id', args.network_id
     yield 'use_discv5', args.discv5
 
-    if args.trinity_root_dir is not None:
+    yield 'trinity_tmp_root_dir', args.trinity_tmp_root_dir
+    if args.trinity_tmp_root_dir:
+        yield 'trinity_root_dir', Path(tempfile.gettempdir()) / Path(_random_symbol_of_length(4))
+    elif args.trinity_root_dir is not None:
         yield 'trinity_root_dir', args.trinity_root_dir
 
     if args.genesis is not None:

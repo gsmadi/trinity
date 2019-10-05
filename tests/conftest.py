@@ -55,9 +55,6 @@ from trinity.rpc.modules import (
 from trinity.rpc.ipc import (
     IPCServer,
 )
-from trinity.tools.async_process_runner import (
-    AsyncProcessRunner,
-)
 from trinity._utils.xdg import (
     get_xdg_trinity_root,
 )
@@ -81,27 +78,11 @@ def xdg_trinity_root(monkeypatch, tmpdir):
     """
     Ensure proper test isolation as well as protecting the real directories.
     """
-    trinity_root_dir = str(tmpdir.mkdir('t'))
-
-    # The default path that pytest generates are too long to be allowed as
-    # IPC Paths (hard UNIX rule). We are shorten them from something like:
-    # /tmp/pytest-of-<username>/pytest-88/<test-name>_command1_0/trinity
-    # to /tmp/pyt-<username>/88/<test-name>_command1_0/t
-
-    fragment1 = 'pytest-of'
-    fragment2 = 'pytest-'
-    expected_fragments = (fragment1, fragment2)
-
-    # If pytest ever changes the tmpdir generation layout, this breaks and we adapt
-    is_expected_path = all(check_str in trinity_root_dir for check_str in expected_fragments)
-    assert is_expected_path, f"Unexpected pytest tmp dir: {trinity_root_dir}, expected fragments: {expected_fragments}"  # noqa: E501
-
-    trinity_root_dir = trinity_root_dir.replace(fragment1, 'pyt-').replace(fragment2, '')
-    monkeypatch.setenv('XDG_TRINITY_ROOT', trinity_root_dir)
-
-    assert not is_under_path(os.path.expandvars('$HOME'), get_xdg_trinity_root())
-
-    return Path(trinity_root_dir)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        xdg_root_dir = Path(tmp_dir) / 'trinity'
+        monkeypatch.setenv('XDG_TRINITY_ROOT', str(xdg_root_dir))
+        assert not is_under_path(os.path.expandvars('$HOME'), get_xdg_trinity_root())
+        yield xdg_root_dir
 
 
 @pytest.fixture(scope='session')
@@ -111,21 +92,6 @@ def event_loop():
         yield loop
     finally:
         loop.close()
-
-
-# This fixture provides a tear down to run after each test that uses it.
-# This ensures the AsyncProcessRunner will never leave a process behind
-@pytest.fixture(scope="function")
-def async_process_runner():
-    runner = AsyncProcessRunner(
-        # This allows running pytest with -s and observing the output
-        debug_fn=lambda line: print(line)
-    )
-    yield runner
-    try:
-        runner.kill()
-    except ProcessLookupError:
-        pass
 
 
 @asynccontextmanager
@@ -214,7 +180,7 @@ def _chain_with_block_validation(base_db, genesis_state, chain_cls=Chain):
         "extra_data": b"B",
         "gas_limit": 3141592,
         "gas_used": 0,
-        "mix_hash": decode_hex("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"),  # noqa: E501
+        "mix_hash": decode_hex("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"),
         "nonce": decode_hex("0102030405060708"),
         "block_number": 0,
         "parent_hash": decode_hex("0000000000000000000000000000000000000000000000000000000000000000"),  # noqa: E501
@@ -316,7 +282,9 @@ async def ipc_server(
     the course of all tests. It yields the IPC server only for monkeypatching purposes
     """
     rpc = RPCServer(
-        initialize_eth1_modules(chain_with_block_validation, event_bus), event_bus,
+        initialize_eth1_modules(chain_with_block_validation, event_bus),
+        chain_with_block_validation,
+        event_bus,
     )
     ipc_server = IPCServer(rpc, jsonrpc_ipc_pipe_path, loop=event_loop)
 

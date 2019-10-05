@@ -1,30 +1,13 @@
-from eth_typing import (
-    BLSPubkey,
-    Hash32,
-)
+from eth_typing import BLSPubkey, Hash32
+from eth_utils import humanize_hash
 import ssz
-from ssz.sedes import (
-    boolean,
-    bytes32,
-    bytes48,
-    uint64,
-)
+from ssz.sedes import boolean, bytes32, bytes48, uint64
 
+from eth2.beacon.constants import FAR_FUTURE_EPOCH, ZERO_HASH32
+from eth2.beacon.typing import Epoch, Gwei
 from eth2.configs import Eth2Config
-from eth2.beacon.constants import (
-    FAR_FUTURE_EPOCH,
-    ZERO_HASH32,
-)
-from eth2.beacon.typing import (
-    Epoch,
-    Gwei,
-)
 
-from .defaults import (
-    default_bls_pubkey,
-    default_epoch,
-    default_gwei,
-)
+from .defaults import default_bls_pubkey, default_epoch, default_gwei
 
 
 def _round_down_to_previous_multiple(amount: int, increment: int) -> int:
@@ -35,8 +18,7 @@ def calculate_effective_balance(amount: Gwei, config: Eth2Config) -> Gwei:
     return Gwei(
         min(
             _round_down_to_previous_multiple(
-                amount,
-                config.EFFECTIVE_BALANCE_INCREMENT,
+                amount, config.EFFECTIVE_BALANCE_INCREMENT
             ),
             config.MAX_EFFECTIVE_BALANCE,
         )
@@ -46,30 +28,32 @@ def calculate_effective_balance(amount: Gwei, config: Eth2Config) -> Gwei:
 class Validator(ssz.Serializable):
 
     fields = [
-        ('pubkey', bytes48),
-        ('withdrawal_credentials', bytes32),
-        ('effective_balance', uint64),
-        ('slashed', boolean),
+        ("pubkey", bytes48),
+        ("withdrawal_credentials", bytes32),
+        ("effective_balance", uint64),
+        ("slashed", boolean),
         # Epoch when validator became eligible for activation
-        ('activation_eligibility_epoch', uint64),
+        ("activation_eligibility_epoch", uint64),
         # Epoch when validator activated
-        ('activation_epoch', uint64),
+        ("activation_epoch", uint64),
         # Epoch when validator exited
-        ('exit_epoch', uint64),
+        ("exit_epoch", uint64),
         # Epoch when validator withdrew
-        ('withdrawable_epoch', uint64),
+        ("withdrawable_epoch", uint64),
     ]
 
-    def __init__(self,
-                 *,
-                 pubkey: BLSPubkey=default_bls_pubkey,
-                 withdrawal_credentials: Hash32=ZERO_HASH32,
-                 effective_balance: Gwei=default_gwei,
-                 slashed: bool=False,
-                 activation_eligibility_epoch: Epoch=default_epoch,
-                 activation_epoch: Epoch=default_epoch,
-                 exit_epoch: Epoch=default_epoch,
-                 withdrawable_epoch: Epoch=default_epoch) -> None:
+    def __init__(
+        self,
+        *,
+        pubkey: BLSPubkey = default_bls_pubkey,
+        withdrawal_credentials: Hash32 = ZERO_HASH32,
+        effective_balance: Gwei = default_gwei,
+        slashed: bool = False,
+        activation_eligibility_epoch: Epoch = default_epoch,
+        activation_epoch: Epoch = default_epoch,
+        exit_epoch: Epoch = default_epoch,
+        withdrawable_epoch: Epoch = default_epoch,
+    ) -> None:
         super().__init__(
             pubkey=pubkey,
             withdrawal_credentials=withdrawal_credentials,
@@ -94,27 +78,40 @@ class Validator(ssz.Serializable):
         From `is_slashable_validator` in the spec.
         """
         not_slashed = self.slashed is False
-        active_but_not_withdrawable = self.activation_epoch <= epoch < self.withdrawable_epoch
+        active_but_not_withdrawable = (
+            self.activation_epoch <= epoch < self.withdrawable_epoch
+        )
         return not_slashed and active_but_not_withdrawable
 
     @classmethod
-    def create_pending_validator(cls,
-                                 pubkey: BLSPubkey,
-                                 withdrawal_credentials: Hash32,
-                                 amount: Gwei,
-                                 config: Eth2Config) -> 'Validator':
+    def create_pending_validator(
+        cls,
+        pubkey: BLSPubkey,
+        withdrawal_credentials: Hash32,
+        amount: Gwei,
+        config: Eth2Config,
+    ) -> "Validator":
         """
         Return a new pending ``Validator`` with the given fields.
         """
         return cls(
             pubkey=pubkey,
             withdrawal_credentials=withdrawal_credentials,
-            effective_balance=calculate_effective_balance(
-                amount,
-                config,
-            ),
+            effective_balance=calculate_effective_balance(amount, config),
             activation_eligibility_epoch=FAR_FUTURE_EPOCH,
             activation_epoch=FAR_FUTURE_EPOCH,
             exit_epoch=FAR_FUTURE_EPOCH,
             withdrawable_epoch=FAR_FUTURE_EPOCH,
+        )
+
+    def __str__(self) -> str:
+        return (
+            f"pubkey={humanize_hash(self.pubkey)},"
+            f" withdrawal_credentials={humanize_hash(self.withdrawal_credentials)},"
+            f" effective_balance={self.effective_balance},"
+            f" slashed={self.slashed},"
+            f" activation_eligibility_epoch={self.activation_eligibility_epoch},"
+            f" activation_epoch={self.activation_epoch},"
+            f" exit_epoch={self.exit_epoch},"
+            f" withdrawable_epoch={self.withdrawable_epoch}"
         )

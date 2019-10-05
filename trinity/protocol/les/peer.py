@@ -1,12 +1,10 @@
 from typing import (
-    Any,
-    cast,
-    Dict,
     List,
     Tuple,
-    Union,
     TYPE_CHECKING,
 )
+
+from cached_property import cached_property
 
 from cancel_token import CancelToken
 from eth.rlp.accounts import Account
@@ -14,27 +12,19 @@ from eth.rlp.headers import BlockHeader
 from eth.rlp.receipts import Receipt
 from lahja import EndpointAPI
 
-from eth_typing import (
-    BlockNumber,
-    Hash32,
-)
+from eth_typing import BlockNumber
 
-from eth_utils import encode_hex
+from eth.constants import GENESIS_BLOCK_NUMBER
+
 from lahja import (
     BroadcastConfig,
 )
 
-from p2p.abc import CommandAPI, NodeAPI
-from p2p.disconnect import DisconnectReason
-from p2p.exceptions import HandshakeFailure
+from p2p.abc import BehaviorAPI, CommandAPI, HandshakerAPI, SessionAPI
 from p2p.peer_pool import BasePeerPool
 from p2p.typing import Payload
 
 from trinity.rlp.block_body import BlockBody
-from trinity.exceptions import (
-    WrongNetworkFailure,
-    WrongGenesisFailure,
-)
 from trinity.protocol.common.peer import (
     BaseChainPeer,
     BaseProxyPeer,
@@ -46,12 +36,8 @@ from trinity.protocol.common.peer_pool_event_bus import (
     BaseProxyPeerPool,
 )
 
-from .commands import (
-    Announce,
-    GetBlockHeaders,
-    Status,
-    StatusV2,
-)
+from .api import LESAPI
+from .commands import GetBlockHeaders
 from .constants import (
     MAX_HEADERS_FETCH,
 )
@@ -72,7 +58,7 @@ from .events import (
     GetContractCodeRequest,
     GetReceiptsRequest,
 )
-from .handlers import LESExchangeHandler
+from .handshaker import LESV1Handshaker, LESV2Handshaker
 
 if TYPE_CHECKING:
     from trinity.sync.light.service import BaseLightPeerChain  # noqa: F401
@@ -84,86 +70,12 @@ class LESPeer(BaseChainPeer):
     supported_sub_protocols = (LESProtocol, LESProtocolV2)
     sub_proto: LESProtocol = None
 
-    _requests: LESExchangeHandler = None
+    def get_behaviors(self) -> Tuple[BehaviorAPI, ...]:
+        return super().get_behaviors() + (LESAPI().as_behavior(),)
 
-    def get_extra_stats(self) -> Tuple[str, ...]:
-        stats_pairs = self.requests.get_stats().items()
-        return tuple(
-            f"{cmd_name}: {stats}" for cmd_name, stats in stats_pairs
-        )
-
-    @property
-    def requests(self) -> LESExchangeHandler:
-        if self._requests is None:
-            self._requests = LESExchangeHandler(self)
-        return self._requests
-
-    def handle_sub_proto_msg(self, cmd: CommandAPI, msg: Payload) -> None:
-        if isinstance(cmd, Announce):
-            head_info = cast(Dict[str, Union[int, Hash32, BlockNumber]], msg)
-            self.head_td = cast(int, head_info['head_td'])
-            self.head_hash = cast(Hash32, head_info['head_hash'])
-            self.head_number = cast(BlockNumber, head_info['head_number'])
-
-        super().handle_sub_proto_msg(cmd, msg)
-
-    async def send_sub_proto_handshake(self) -> None:
-        chain_info = await self._local_chain_info
-        handshake_params = LESHandshakeParams(
-            version=self.sub_proto.version,
-            network_id=chain_info.network_id,
-            head_td=chain_info.total_difficulty,
-            head_hash=chain_info.block_hash,
-            head_num=chain_info.block_number,
-            genesis_hash=chain_info.genesis_hash,
-            serve_headers=True,
-            tx_relay=False,
-            serve_chain_since=None,
-            serve_state_since=None,
-            serve_recent_state=None,
-            serve_recent_chain=None,
-            flow_control_bl=None,
-            flow_control_mcr=None,
-            flow_control_mrr=None,
-            announce_type=None if self.sub_proto.version < 2 else self.sub_proto.version,
-        )
-        self.sub_proto.send_handshake(handshake_params)
-
-    async def process_sub_proto_handshake(
-            self, cmd: CommandAPI, msg: Payload) -> None:
-        if not isinstance(cmd, (Status, StatusV2)):
-            await self.disconnect(DisconnectReason.subprotocol_error)
-            raise HandshakeFailure(f"Expected a LES Status msg, got {cmd}, disconnecting")
-
-        msg = cast(Dict[str, Any], msg)
-
-        self.head_td = msg['headTd']
-        self.head_hash = msg['headHash']
-        self.head_number = msg['headNum']
-        self.network_id = msg['networkId']
-        self.genesis_hash = msg['genesisHash']
-
-        if msg['networkId'] != self.local_network_id:
-            await self.disconnect(DisconnectReason.useless_peer)
-            raise WrongNetworkFailure(
-                f"{self} network ({msg['networkId']}) does not match ours "
-                f"({self.local_network_id}), disconnecting"
-            )
-
-        local_genesis_hash = await self._get_local_genesis_hash()
-        if msg['genesisHash'] != local_genesis_hash:
-            await self.disconnect(DisconnectReason.useless_peer)
-            raise WrongGenesisFailure(
-                f"{self} genesis ({encode_hex(msg['genesisHash'])}) does not "
-                f"match ours ({local_genesis_hash}), disconnecting"
-            )
-
-        # Eventually we might want to keep connections to peers where we are the only side serving
-        # data, but right now both our chain syncer and the Peer.boot() method expect the remote
-        # to reply to header requests, so if they don't we simply disconnect here.
-        if 'serveHeaders' not in msg:
-            await self.disconnect(DisconnectReason.useless_peer)
-            raise HandshakeFailure(f"{self} doesn't serve headers, disconnecting")
+    @cached_property
+    def les_api(self) -> LESAPI:
+        return self.connection.get_logic(LESAPI.name, LESAPI)
 
 
 class LESProxyPeer(BaseProxyPeer):
@@ -174,24 +86,59 @@ class LESProxyPeer(BaseProxyPeer):
     """
 
     def __init__(self,
-                 remote: NodeAPI,
+                 session: SessionAPI,
                  event_bus: EndpointAPI,
                  sub_proto: ProxyLESProtocol):
 
-        super().__init__(remote, event_bus)
+        super().__init__(session, event_bus)
 
         self.sub_proto = sub_proto
 
     @classmethod
-    def from_node(cls,
-                  remote: NodeAPI,
-                  event_bus: EndpointAPI,
-                  broadcast_config: BroadcastConfig) -> 'LESProxyPeer':
-        return cls(remote, event_bus, ProxyLESProtocol(remote, event_bus, broadcast_config))
+    def from_session(cls,
+                     session: SessionAPI,
+                     event_bus: EndpointAPI,
+                     broadcast_config: BroadcastConfig) -> 'LESProxyPeer':
+        return cls(session, event_bus, ProxyLESProtocol(session, event_bus, broadcast_config))
 
 
 class LESPeerFactory(BaseChainPeerFactory):
     peer_class = LESPeer
+
+    async def get_handshakers(self) -> Tuple[HandshakerAPI, ...]:
+        headerdb = self.context.headerdb
+        wait = self.cancel_token.cancellable_wait
+
+        head = await wait(headerdb.coro_get_canonical_head())
+        total_difficulty = await wait(headerdb.coro_get_score(head.hash))
+        genesis_hash = await wait(
+            headerdb.coro_get_canonical_block_hash(BlockNumber(GENESIS_BLOCK_NUMBER))
+        )
+        handshake_params_kwargs = dict(
+            network_id=self.context.network_id,
+            head_td=total_difficulty,
+            head_hash=head.hash,
+            head_number=head.block_number,
+            genesis_hash=genesis_hash,
+            serve_headers=True,
+            # TODO: these should be configurable to allow us to serve this data.
+            serve_chain_since=None,
+            serve_state_since=None,
+            serve_recent_state=None,
+            serve_recent_chain=None,
+            tx_relay=None,
+            flow_control_bl=None,
+            flow_control_mcr=None,
+            flow_control_mrr=None,
+            announce_type=None,
+        )
+        v1_handshake_params = LESHandshakeParams(version=1, **handshake_params_kwargs)
+        v2_handshake_params = LESHandshakeParams(version=2, **handshake_params_kwargs)
+
+        return (
+            LESV1Handshaker(handshake_params=v1_handshake_params),
+            LESV2Handshaker(handshake_params=v2_handshake_params),
+        )
 
 
 class LESPeerPoolEventServer(PeerPoolEventServer[LESPeer]):
@@ -213,8 +160,8 @@ class LESPeerPoolEventServer(PeerPoolEventServer[LESPeer]):
 
         self.run_daemon_event(
             SendBlockHeadersEvent,
-            lambda ev: self.try_with_node(
-                ev.remote,
+            lambda ev: self.try_with_session(
+                ev.session,
                 lambda peer: peer.sub_proto.send_block_headers(ev.headers, ev.buffer_value, ev.request_id)  # noqa: E501
             )
         )
@@ -264,11 +211,11 @@ class LESPeerPoolEventServer(PeerPoolEventServer[LESPeer]):
         return await self.chain.coro_get_contract_code(event.block_hash, event.address)
 
     async def handle_native_peer_message(self,
-                                         remote: NodeAPI,
+                                         session: SessionAPI,
                                          cmd: CommandAPI,
                                          msg: Payload) -> None:
         if isinstance(cmd, GetBlockHeaders):
-            await self.event_bus.broadcast(GetBlockHeadersEvent(remote, cmd, msg))
+            await self.event_bus.broadcast(GetBlockHeadersEvent(session, cmd, msg))
         else:
             raise Exception(f"Command {cmd} is not broadcasted")
 
@@ -279,12 +226,12 @@ class LESPeerPool(BaseChainPeerPool):
 
 class LESProxyPeerPool(BaseProxyPeerPool[LESProxyPeer]):
 
-    def convert_node_to_proxy_peer(self,
-                                   remote: NodeAPI,
-                                   event_bus: EndpointAPI,
-                                   broadcast_config: BroadcastConfig) -> LESProxyPeer:
-        return LESProxyPeer.from_node(
-            remote,
+    def convert_session_to_proxy_peer(self,
+                                      session: SessionAPI,
+                                      event_bus: EndpointAPI,
+                                      broadcast_config: BroadcastConfig) -> LESProxyPeer:
+        return LESProxyPeer.from_session(
+            session,
             self.event_bus,
             self.broadcast_config
         )

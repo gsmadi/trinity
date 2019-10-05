@@ -24,6 +24,14 @@ class PeerConnectionLost(BaseP2PError):
     pass
 
 
+class ConnectionBusy(BaseP2PError):
+    """
+    Raised when an attempt is made to wait for a certain message type from a
+    peer when there is already an active wait for that message type.
+    """
+    pass
+
+
 class IneligiblePeer(BaseP2PError):
     """
     Raised when a peer is not a valid connection candidate.
@@ -181,3 +189,25 @@ class NoMatchingPeerCapabilities(BaseP2PError):
     """
     Raised during primary p2p handshake if there are no common capabilities with a peer.
     """
+    pass
+
+
+class ReceiptNotFound(BaseP2PError):
+    """
+    Raised when trying to retrieve a protocol receipt that isn't available
+    """
+    pass
+
+
+class DuplicateAPI(BaseP2PError):
+    """
+    Raised when trying to add an API to a connection under an existing key
+    """
+    pass
+
+
+class UnknownAPI(BaseP2PError):
+    """
+    Raised when trying to retrieve an API from a connection that.
+    """
+    pass

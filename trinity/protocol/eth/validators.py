@@ -1,20 +1,21 @@
 from typing import (
-    Tuple,
+    Sequence,
 )
 
-from eth.rlp.headers import BlockHeader
 from eth_typing import (
     Hash32,
 )
 from eth_utils import (
     ValidationError,
 )
+from eth.abc import BlockHeaderAPI
+
+from p2p.exchange import ValidatorAPI
 
 from trinity.protocol.common.validators import (
-    BaseValidator,
     BaseBlockHeadersValidator,
 )
-from trinity.protocol.common.types import (
+from trinity.protocol.common.typing import (
     BlockBodyBundles,
     NodeDataBundles,
     ReceiptsBundles,
@@ -27,8 +28,8 @@ class GetBlockHeadersValidator(BaseBlockHeadersValidator):
     protocol_max_request_size = constants.MAX_HEADERS_FETCH
 
 
-class GetNodeDataValidator(BaseValidator[NodeDataBundles]):
-    def __init__(self, node_hashes: Tuple[Hash32, ...]) -> None:
+class GetNodeDataValidator(ValidatorAPI[NodeDataBundles]):
+    def __init__(self, node_hashes: Sequence[Hash32]) -> None:
         self.node_hashes = node_hashes
 
     def validate_result(self, response: NodeDataBundles) -> None:
@@ -48,8 +49,8 @@ class GetNodeDataValidator(BaseValidator[NodeDataBundles]):
             raise ValidationError(f"Response contains {len(unexpected_keys)} unexpected nodes")
 
 
-class ReceiptsValidator(BaseValidator[ReceiptsBundles]):
-    def __init__(self, headers: Tuple[BlockHeader, ...]) -> None:
+class ReceiptsValidator(ValidatorAPI[ReceiptsBundles]):
+    def __init__(self, headers: Sequence[BlockHeaderAPI]) -> None:
         self.headers = headers
 
     def validate_result(self, result: ReceiptsBundles) -> None:
@@ -70,8 +71,8 @@ class ReceiptsValidator(BaseValidator[ReceiptsBundles]):
             raise ValidationError(f"Got {len(unexpected_roots)} unexpected receipt roots")
 
 
-class GetBlockBodiesValidator(BaseValidator[BlockBodyBundles]):
-    def __init__(self, headers: Tuple[BlockHeader, ...]) -> None:
+class GetBlockBodiesValidator(ValidatorAPI[BlockBodyBundles]):
+    def __init__(self, headers: Sequence[BlockHeaderAPI]) -> None:
         self.headers = headers
 
     def validate_result(self, response: BlockBodyBundles) -> None:

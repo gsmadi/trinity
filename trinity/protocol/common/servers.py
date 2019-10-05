@@ -10,6 +10,8 @@ from cancel_token import CancelToken, OperationCancelled
 
 from lahja import EndpointAPI
 
+from eth_utils import get_extended_debug_logger
+
 from eth.exceptions import (
     HeaderNotFound,
 )
@@ -21,7 +23,7 @@ from lahja import (
     BroadcastConfig,
 )
 
-from p2p.abc import CommandAPI, NodeAPI
+from p2p.abc import CommandAPI, SessionAPI
 from p2p.cancellable import CancellableMixin
 from p2p.peer import (
     BasePeer,
@@ -34,7 +36,6 @@ from trinity.db.eth1.header import BaseAsyncHeaderDB
 from trinity.protocol.common.events import PeerPoolMessageEvent
 from trinity.protocol.common.peer import BasePeerPool
 from trinity.protocol.common.requests import BaseHeaderRequest
-from trinity._utils.logging import HasExtendedDebugLogger
 
 
 class BaseRequestServer(BaseService, PeerSubscriber):
@@ -113,31 +114,33 @@ class BaseIsolatedRequestServer(BaseService):
     async def handle_stream(self, event_type: Type[PeerPoolMessageEvent]) -> None:
         while self.is_operational:
             async for event in self.wait_iter(self.event_bus.stream(event_type)):
-                self.run_task(self._quiet_handle_msg(event.remote, event.cmd, event.msg))
+                self.run_task(self._quiet_handle_msg(event.session, event.cmd, event.msg))
 
     async def _quiet_handle_msg(
             self,
-            remote: NodeAPI,
+            session: SessionAPI,
             cmd: CommandAPI,
             msg: Payload) -> None:
         try:
-            await self._handle_msg(remote, cmd, msg)
+            await self._handle_msg(session, cmd, msg)
         except OperationCancelled:
             # Silently swallow OperationCancelled exceptions because otherwise they'll be caught
             # by the except below and treated as unexpected.
             pass
         except Exception:
-            self.logger.exception("Unexpected error when processing msg from %s", remote)
+            self.logger.exception("Unexpected error when processing msg from %s", session)
 
     @abstractmethod
     async def _handle_msg(self,
-                          remote: NodeAPI,
+                          session: SessionAPI,
                           cmd: CommandAPI,
                           msg: Payload) -> None:
         ...
 
 
-class BasePeerRequestHandler(CancellableMixin, HasExtendedDebugLogger):
+class BasePeerRequestHandler(CancellableMixin):
+    logger = get_extended_debug_logger('trinity.protocol.common.servers.PeerRequestHandler')
+
     def __init__(self, db: BaseAsyncHeaderDB, token: CancelToken) -> None:
         self.db = db
         self.cancel_token = token

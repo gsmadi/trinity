@@ -4,6 +4,7 @@ from typing import (
     List,
     NamedTuple,
     Optional,
+    Sequence,
     Tuple,
     TYPE_CHECKING,
     Union,
@@ -24,9 +25,10 @@ from eth_utils import (
     ValidationError,
 )
 
+from eth.abc import BlockHeaderAPI
 from eth.rlp.headers import BlockHeader
 
-from p2p.abc import NodeAPI
+from p2p.abc import SessionAPI
 from p2p.protocol import Protocol
 from p2p.typing import Payload
 
@@ -64,7 +66,7 @@ class LESHandshakeParams(NamedTuple):
     network_id: int
     head_td: int
     head_hash: Hash32
-    head_num: BlockNumber
+    head_number: BlockNumber
     genesis_hash: Hash32
     serve_headers: bool
     serve_chain_since: Optional[BlockNumber]
@@ -86,7 +88,7 @@ class LESHandshakeParams(NamedTuple):
         yield 'networkId', self.network_id
         yield 'headTd', self.head_td
         yield 'headHash', self.head_hash
-        yield 'headNum', self.head_num
+        yield 'headNum', self.head_number
         yield 'genesisHash', self.genesis_hash
         if self.serve_headers is True:
             yield 'serveHeaders', None
@@ -136,6 +138,22 @@ class LESProtocol(Protocol):
         self.transport.send(*cmd.encode(resp))
         self.logger.debug("Sending LES/Status msg: %s", resp)
 
+    def send_announce(self,
+                      header: BlockHeaderAPI,
+                      head_td: int,
+                      reorg_depth: int = 0,
+                      params: Sequence[Any] = ()) -> None:
+        data = {
+            'head_hash': header.hash,
+            'head_number': header.block_number,
+            'head_td': head_td,
+            'reorg_depth': reorg_depth,
+            'params': params,
+        }
+        cmd = Announce(self.cmd_id_offset, self.snappy_support)
+        self.logger.debug("Sending LES/Announce msg: %s", data)
+        self.transport.send(*cmd.encode(data))
+
     def send_get_block_bodies(self, block_hashes: List[bytes], request_id: int=None) -> int:
         if request_id is None:
             request_id = gen_request_id()
@@ -183,7 +201,9 @@ class LESProtocol(Protocol):
         return request_id
 
     def send_block_headers(
-            self, headers: Tuple[BlockHeader, ...], buffer_value: int, request_id: int=None) -> int:
+            self, headers: Tuple[BlockHeaderAPI, ...],
+            buffer_value: int,
+            request_id: int=None) -> int:
         if request_id is None:
             request_id = gen_request_id()
         data = {
@@ -282,10 +302,10 @@ class ProxyLESProtocol:
     action performed on this class is delegated to the process that runs the peer pool.
     """
     def __init__(self,
-                 remote: NodeAPI,
+                 session: SessionAPI,
                  event_bus: EndpointAPI,
                  broadcast_config: BroadcastConfig):
-        self.remote = remote
+        self.session = session
         self._event_bus = event_bus
         self._broadcast_config = broadcast_config
 
@@ -312,7 +332,7 @@ class ProxyLESProtocol:
         req_id = request_id if not None else gen_request_id()
 
         self._event_bus.broadcast_nowait(
-            SendBlockHeadersEvent(self.remote, headers, buffer_value, req_id),
+            SendBlockHeadersEvent(self.session, headers, buffer_value, req_id),
             self._broadcast_config,
         )
         return req_id

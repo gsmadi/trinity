@@ -22,7 +22,7 @@ from typing import (
 )
 
 from cancel_token import CancelToken, OperationCancelled
-from eth_typing import Hash32
+from eth_typing import BlockNumber, Hash32
 from eth_utils import (
     humanize_hash,
     humanize_seconds,
@@ -53,6 +53,7 @@ from p2p.disconnect import DisconnectReason
 from p2p.exceptions import BaseP2PError, PeerConnectionLost
 from p2p.peer import BasePeer, PeerSubscriber
 from p2p.service import BaseService
+from p2p.stats.ema import EMA
 from p2p.token_bucket import TokenBucket
 
 from trinity.chains.base import AsyncChainAPI
@@ -86,7 +87,6 @@ from trinity._utils.datastructures import (
     OrderedTaskPreparation,
     TaskQueue,
 )
-from trinity._utils.ema import EMA
 from trinity._utils.headers import (
     skip_complete_headers,
 )
@@ -395,8 +395,8 @@ class BaseBodyChainSyncer(BaseService, PeerSubscriber):
         """
         self.logger.debug("Requesting block bodies for %d headers from %s", len(batch), peer)
         try:
-            block_body_bundles = await peer.requests.get_block_bodies(tuple(batch))
-        except TimeoutError as err:
+            block_body_bundles = await peer.eth_api.get_block_bodies(tuple(batch))
+        except asyncio.TimeoutError as err:
             self.logger.debug(
                 "Timed out requesting block bodies for %d headers from %s", len(batch), peer,
             )
@@ -430,7 +430,9 @@ class BaseBodyChainSyncer(BaseService, PeerSubscriber):
             local_header = None
 
         try:
-            local_parent = await self.db.coro_get_canonical_block_header_by_number(block_num - 1)
+            local_parent = await self.db.coro_get_canonical_block_header_by_number(
+                BlockNumber(block_num - 1)
+            )
         except HeaderNotFound as exc:
             self.logger.debug("Could not find canonical header parent at #%d: %s", block_num, exc)
             local_parent = None
@@ -464,7 +466,7 @@ class FastChainSyncer(BaseService):
                  peer_pool: ETHPeerPool,
                  token: CancelToken = None) -> None:
         super().__init__(token=token)
-        self._header_syncer = ETHHeaderChainSyncer(chain, db, peer_pool, self.cancel_token)
+        self._header_syncer = ETHHeaderChainSyncer(chain, db, peer_pool, token=self.cancel_token)
         self._body_syncer = FastChainBodySyncer(
             chain,
             db,
@@ -915,8 +917,8 @@ class FastChainBodySyncer(BaseBodyChainSyncer):
         """
         self.logger.debug("Requesting receipts for %d headers from %s", len(batch), peer)
         try:
-            receipt_bundles = await peer.requests.get_receipts(tuple(batch))
-        except TimeoutError as err:
+            receipt_bundles = await peer.eth_api.get_receipts(tuple(batch))
+        except asyncio.TimeoutError as err:
             self.logger.debug(
                 "Timed out requesting receipts for %d headers from %s", len(batch), peer,
             )
@@ -947,7 +949,7 @@ class RegularChainSyncer(BaseService):
                  peer_pool: ETHPeerPool,
                  token: CancelToken = None) -> None:
         super().__init__(token=token)
-        self._header_syncer = ETHHeaderChainSyncer(chain, db, peer_pool, self.cancel_token)
+        self._header_syncer = ETHHeaderChainSyncer(chain, db, peer_pool, token=self.cancel_token)
         self._body_syncer = RegularChainBodySyncer(
             chain,
             db,
@@ -1084,31 +1086,10 @@ class RegularChainBodySyncer(BaseBodyChainSyncer):
             header = completed_headers[0]
             block = self._header_to_block(header)
 
-            # put block in short queue for import, wait here if queue is full
+            # Put block in short queue for import, wait here if queue is full
             await self.wait(self._import_queue.put(block))
 
-            # emit block for preview, potentially execute it
-
-            # We want to limit how many parallel preview blocks are importing, so
-            #   we wait for the above put() to complete before running the following...
-            num_queued_items = self._import_queue.qsize()
-            # We are targeting at least two blocks in front before running a preview execution.
-            #   Previewing a block can take a while, so it's a waste to run it
-            #   when the block is about to be actually imported.
-            # We can tell that `block` has two in front, if qsize() == 2 after
-            #   inserting it: one block is actively importing, and one is already
-            #   in the queue.
-            lagging = num_queued_items >= 2
-            if not lagging:
-                self.logger.debug(
-                    "Skipping parallel execution of %s, because import queue is ~empty",
-                    header,
-                )
-
-            # We *always* run the preview to:
-            #   - look up the addresses referenced by the transaction (sender and recipient)
-            #   - store the header (for future evm execution that might look up old block hashes)
-            # We only run the preview *execution* if we are lagging
+            # Load the state root of the parent header
             try:
                 parent_state_root = self._block_hash_to_state_root[header.parent_hash]
             except KeyError:
@@ -1117,16 +1098,14 @@ class RegularChainBodySyncer(BaseBodyChainSyncer):
                 parent = await self.chain.coro_get_block_header_by_hash(header.parent_hash)
                 parent_state_root = parent.state_root
 
-            # We *always* run the preview to:
-            #   - look up the addresses referenced by the transaction (sender and recipient)
+            # Emit block for preview
+            #   - look up the addresses referenced by the transaction (eg~ sender and recipient)
+            #   - execute the block ahead of time to start collecting any missing state
             #   - store the header (for future evm execution that might look up old block hashes)
-            # We only run the preview *execution* if we are lagging
-            # TODO should this be split into two calls then?
             await self._block_importer.preview_transactions(
                 header,
                 block.transactions,
                 parent_state_root,
-                lagging,
             )
 
     async def _import_ready_blocks(self) -> None:
@@ -1157,6 +1136,9 @@ class RegularChainBodySyncer(BaseBodyChainSyncer):
         _, new_canonical_blocks, old_canonical_blocks = await self.wait(
             self._block_importer.import_block(block)
         )
+        # how much is the imported block's header behind the current time?
+        lag = time.time() - block.header.timestamp
+        humanized_lag = humanize_seconds(lag)
 
         if new_canonical_blocks == (block,):
             # simple import of a single new block.
@@ -1172,21 +1154,27 @@ class RegularChainBodySyncer(BaseBodyChainSyncer):
                 block.number,
                 len(block.transactions),
                 timer.elapsed,
-                humanize_seconds(time.time() - block.header.timestamp),
+                humanized_lag,
             )
         elif not new_canonical_blocks:
             # imported block from a fork.
-            self.logger.info("Imported non-canonical block %d (%d txs) in %.2f seconds",
-                             block.number, len(block.transactions), timer.elapsed)
+            self.logger.info(
+                "Imported non-canonical block %d (%d txs) in %.2f seconds, with %s lag",
+                block.number,
+                len(block.transactions),
+                timer.elapsed,
+                humanized_lag,
+            )
         elif old_canonical_blocks:
             self.logger.info(
-                "Chain Reorganization: Imported block %d (%d txs) in %.2f "
-                "seconds, %d blocks discarded and %d new canonical blocks added",
+                "Chain Reorganization: Imported block %d (%d txs) in %.2f seconds, "
+                "%d blocks discarded and %d new canonical blocks added, with %s lag",
                 block.number,
                 len(block.transactions),
                 timer.elapsed,
                 len(old_canonical_blocks),
                 len(new_canonical_blocks),
+                humanized_lag,
             )
         else:
             raise Exception("Invariant: unreachable code path")

@@ -6,17 +6,17 @@ from typing import (
     Union,
 )
 
+from cached_property import cached_property
+
+from eth_typing import BlockNumber, Hash32
 from eth_utils import encode_hex
 
-from p2p.abc import MultiplexerAPI
+from p2p.abc import MultiplexerAPI, ProtocolAPI
 from p2p.exceptions import (
     HandshakeFailure,
 )
-from p2p.handshake import (
-    HandshakeReceipt,
-    Handshaker,
-)
-from p2p.protocol import Protocol
+from p2p.handshake import Handshaker
+from p2p.receipt import HandshakeReceipt
 
 from trinity.exceptions import WrongGenesisFailure, WrongNetworkFailure
 
@@ -39,6 +39,26 @@ class LESHandshakeReceipt(HandshakeReceipt):
         super().__init__(protocol)
         self.handshake_params = handshake_params
 
+    @cached_property
+    def network_id(self) -> int:
+        return self.handshake_params.network_id
+
+    @cached_property
+    def head_td(self) -> int:
+        return self.handshake_params.head_td
+
+    @cached_property
+    def head_hash(self) -> Hash32:
+        return self.handshake_params.head_hash
+
+    @cached_property
+    def head_number(self) -> BlockNumber:
+        return self.handshake_params.head_number
+
+    @cached_property
+    def genesis_hash(self) -> Hash32:
+        return self.handshake_params.genesis_hash
+
 
 class BaseLESHandshaker(Handshaker):
     handshake_params: LESHandshakeParams
@@ -50,7 +70,7 @@ class BaseLESHandshaker(Handshaker):
 
     async def do_handshake(self,
                            multiplexer: MultiplexerAPI,
-                           protocol: Protocol) -> LESHandshakeReceipt:
+                           protocol: ProtocolAPI) -> LESHandshakeReceipt:
         """Perform the handshake for the sub-protocol agreed with the remote peer.
 
         Raises HandshakeFailure if the handshake is not successful.
@@ -69,7 +89,7 @@ class BaseLESHandshaker(Handshaker):
                 network_id=msg['networkId'],
                 head_td=msg['headTd'],
                 head_hash=msg['headHash'],
-                head_num=msg['headNum'],
+                head_number=msg['headNum'],
                 genesis_hash=msg['genesisHash'],
                 serve_headers=('serveHeaders' in msg),
                 serve_chain_since=msg.get('serveChainSince'),

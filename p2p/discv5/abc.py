@@ -3,15 +3,27 @@ from abc import (
     abstractmethod,
 )
 from typing import (
+    AsyncContextManager,
+    AsyncIterable,
+    Generic,
+    Optional,
     Type,
+    TypeVar,
 )
 
 from p2p.discv5.enr import (
     ENR,
 )
+from p2p.discv5.channel_services import (
+    Endpoint,
+    IncomingMessage,
+)
 from p2p.discv5.identity_schemes import (
     IdentityScheme,
     IdentitySchemeRegistry,
+)
+from p2p.discv5.messages import (
+    BaseMessage,
 )
 from p2p.discv5.packets import (
     Packet,
@@ -130,4 +142,72 @@ class EnrDbApi(ABC):
     @abstractmethod
     async def contains(self, node_id: NodeID) -> bool:
         """Check if the db contains an ENR with the given node id."""
+        ...
+
+
+ChannelContentType = TypeVar("ChannelContentType")
+ChannelHandlerAsyncContextManager = AsyncContextManager[
+    "ChannelHandlerSubscriptionAPI[ChannelContentType]"
+]
+
+
+class ChannelHandlerSubscriptionAPI(Generic[ChannelContentType],
+                                    AsyncIterable[ChannelContentType],
+                                    AsyncContextManager[
+                                        "ChannelHandlerSubscriptionAPI[ChannelContentType]"],
+                                    ):
+    @abstractmethod
+    def cancel(self) -> None:
+        ...
+
+    @abstractmethod
+    async def receive(self) -> ChannelContentType:
+        ...
+
+
+class MessageDispatcherAPI(ABC):
+    @abstractmethod
+    def get_free_request_id(self, node_id: NodeID) -> int:
+        """Get a currently unused request id for requests to the given node."""
+        ...
+
+    @abstractmethod
+    async def request(self,
+                      receiver_node_id: NodeID,
+                      message: BaseMessage,
+                      endpoint: Optional[Endpoint] = None,
+                      ) -> IncomingMessage:
+        """Send a request to the given peer and return the response.
+
+        This is the primary interface for requesting data from a peer. Internally, it will look up
+        the peer's ENR in the database, extract endpoint information from it, add a response
+        handler, send the request, wait for the response, and finally remove the handler again.
+
+        This method cannot be used if the response consists of multiple messages.
+
+        If no endpoint is given, it will be queried from the ENR DB, raising a ValueError if it is
+        not present.
+        """
+        ...
+
+    @abstractmethod
+    def add_request_handler(self,
+                            message_class: Type[BaseMessage],
+                            ) -> ChannelHandlerSubscriptionAPI[IncomingMessage]:
+        """Add a request handler for messages of a given type.
+
+        Only one handler per message type can be added.
+        """
+        ...
+
+    @abstractmethod
+    def add_response_handler(self,
+                             remote_node_id: NodeID,
+                             request_id: int,
+                             ) -> ChannelHandlerSubscriptionAPI[IncomingMessage]:
+        """Add a response handler.
+
+        All messages sent by the given peer with the given request id will be send to the returned
+        handler's channel.
+        """
         ...

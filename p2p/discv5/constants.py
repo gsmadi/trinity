@@ -22,8 +22,20 @@ IP_V6_SIZE = 16  # size of an IPv6 address
 
 ENR_REPR_PREFIX = "enr:"  # prefix used when printing an ENR
 MAX_ENR_SIZE = 300  # maximum allowed size of an ENR
+IP_V4_ADDRESS_ENR_KEY = b"ip"
+UDP_PORT_ENR_KEY = b"udp"
 
 WHO_ARE_YOU_MAGIC_SUFFIX = b"WHOAREYOU"
+HKDF_INFO = b"discovery v5 key agreement"
 
 # buffer size used for incoming UDP datagrams (should be larger than MAX_PACKET_SIZE)
 DATAGRAM_BUFFER_SIZE = 2048
+
+MAX_REQUEST_ID = 2**32 - 1  # highest request id used for outgoing requests
+MAX_REQUEST_ID_ATTEMPTS = 100  # number of attempts we take to guess a available request id
+
+REQUEST_RESPONSE_TIMEOUT = 0.5  # timeout for waiting for response after request was sent
+HANDSHAKE_TIMEOUT = 1  # timeout for performing a handshake
+ROUTING_TABLE_PING_INTERVAL = 5  # interval of outgoing pings sent to maintain the routing table
+
+NUM_ROUTING_TABLE_BUCKETS = 256  # number of buckets in the routing table

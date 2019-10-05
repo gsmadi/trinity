@@ -1,6 +1,7 @@
 from typing import (
     Any,
     Dict,
+    Sequence,
     Tuple,
 )
 
@@ -8,18 +9,14 @@ from eth_typing import (
     BlockIdentifier,
     Hash32,
 )
-from eth.rlp.headers import BlockHeader
+from eth.abc import BlockHeaderAPI
 
-from trinity.protocol.common.exchanges import (
+from p2p.exchange import (
     BaseExchange,
-)
-from trinity.protocol.common.normalizers import (
     NoopNormalizer,
-)
-from trinity.protocol.common.validators import (
     noop_payload_validator,
 )
-from trinity.protocol.common.types import (
+from trinity.protocol.common.typing import (
     BlockBodyBundles,
     NodeDataBundles,
     ReceiptsByBlock,
@@ -53,13 +50,13 @@ from .validators import (
 
 BaseGetBlockHeadersExchange = BaseExchange[
     Dict[str, Any],
-    Tuple[BlockHeader, ...],
-    Tuple[BlockHeader, ...],
+    Sequence[BlockHeaderAPI],
+    Tuple[BlockHeaderAPI, ...],
 ]
 
 
 class GetBlockHeadersExchange(BaseGetBlockHeadersExchange):
-    _normalizer = NoopNormalizer[Tuple[BlockHeader, ...]]()
+    _normalizer = NoopNormalizer[Sequence[BlockHeaderAPI], Tuple[BlockHeaderAPI, ...]]()
     request_class = GetBlockHeadersRequest
     tracker_class = GetBlockHeadersTracker
 
@@ -69,7 +66,7 @@ class GetBlockHeadersExchange(BaseGetBlockHeadersExchange):
             max_headers: int = None,
             skip: int = 0,
             reverse: bool = True,
-            timeout: float = None) -> Tuple[BlockHeader, ...]:
+            timeout: float = None) -> Tuple[BlockHeaderAPI, ...]:
 
         original_request_args = (block_number_or_hash, max_headers, skip, reverse)
         validator = GetBlockHeadersValidator(*original_request_args)
@@ -84,7 +81,7 @@ class GetBlockHeadersExchange(BaseGetBlockHeadersExchange):
         )
 
 
-BaseNodeDataExchange = BaseExchange[Tuple[Hash32, ...], Tuple[bytes, ...], NodeDataBundles]
+BaseNodeDataExchange = BaseExchange[Sequence[Hash32], Sequence[bytes], NodeDataBundles]
 
 
 class GetNodeDataExchange(BaseNodeDataExchange):
@@ -93,7 +90,7 @@ class GetNodeDataExchange(BaseNodeDataExchange):
     tracker_class = GetNodeDataTracker
 
     async def __call__(self,  # type: ignore
-                       node_hashes: Tuple[Hash32, ...],
+                       node_hashes: Sequence[Hash32],
                        timeout: float = None) -> NodeDataBundles:
         validator = GetNodeDataValidator(node_hashes)
         request = self.request_class(node_hashes)
@@ -106,13 +103,13 @@ class GetNodeDataExchange(BaseNodeDataExchange):
         )
 
 
-class GetReceiptsExchange(BaseExchange[Tuple[Hash32, ...], ReceiptsByBlock, ReceiptsBundles]):
+class GetReceiptsExchange(BaseExchange[Sequence[Hash32], ReceiptsByBlock, ReceiptsBundles]):
     _normalizer = ReceiptsNormalizer()
     request_class = GetReceiptsRequest
     tracker_class = GetReceiptsTracker
 
     async def __call__(self,  # type: ignore
-                       headers: Tuple[BlockHeader, ...],
+                       headers: Sequence[BlockHeaderAPI],
                        timeout: float = None) -> ReceiptsBundles:
         validator = ReceiptsValidator(headers)
 
@@ -129,8 +126,8 @@ class GetReceiptsExchange(BaseExchange[Tuple[Hash32, ...], ReceiptsByBlock, Rece
 
 
 BaseGetBlockBodiesExchange = BaseExchange[
-    Tuple[Hash32, ...],
-    Tuple[BlockBody, ...],
+    Sequence[Hash32],
+    Sequence[BlockBody],
     BlockBodyBundles,
 ]
 
@@ -141,7 +138,7 @@ class GetBlockBodiesExchange(BaseGetBlockBodiesExchange):
     tracker_class = GetBlockBodiesTracker
 
     async def __call__(self,  # type: ignore
-                       headers: Tuple[BlockHeader, ...],
+                       headers: Sequence[BlockHeaderAPI],
                        timeout: float = None) -> BlockBodyBundles:
         validator = GetBlockBodiesValidator(headers)
 

@@ -34,7 +34,6 @@ from eth_utils.toolz import (
     take,
 )
 
-from eth.constants import GENESIS_BLOCK_NUMBER
 from eth.exceptions import (
     HeaderNotFound,
 )
@@ -42,16 +41,14 @@ from eth.rlp.headers import BlockHeader
 
 from p2p.abc import CommandAPI
 from p2p.constants import SEAL_CHECK_RANDOM_SAMPLE_RATE
-from p2p.disconnect import DisconnectReason
 from p2p.exceptions import BaseP2PError, PeerConnectionLost
 from p2p.peer import BasePeer, PeerSubscriber
 from p2p.service import BaseService
 
 from trinity.chains.base import AsyncChainAPI
 from trinity.db.eth1.header import BaseAsyncHeaderDB
-from trinity.protocol.common.commands import (
-    BaseBlockHeaders,
-)
+from trinity.protocol.eth.commands import BlockHeaders as ETHBlockHeaders
+from trinity.protocol.les.commands import BlockHeaders as LESBlockHEaders
 from trinity.protocol.common.monitors import BaseChainTipMonitor
 from trinity.protocol.common.peer import BaseChainPeer, BaseChainPeerPool
 from trinity.protocol.eth.constants import (
@@ -62,8 +59,13 @@ from trinity.sync.common.constants import (
     MAX_SKELETON_REORG_DEPTH,
 )
 from trinity.sync.common.peers import TChainPeer, WaitingPeers
+from trinity.sync.common.strategies import (
+    FromGenesisLaunchStrategy,
+    SyncLaunchStrategyAPI,
+)
 from trinity._utils.datastructures import (
     DuplicateTasks,
+    NoPrerequisites,
     OrderedTaskPreparation,
     TaskQueue,
 )
@@ -87,10 +89,15 @@ class SkeletonSyncer(BaseService, Generic[TChainPeer]):
                  chain: AsyncChainAPI,
                  db: BaseAsyncHeaderDB,
                  peer: TChainPeer,
-                 token: CancelToken) -> None:
+                 token: CancelToken,
+                 launch_strategy: SyncLaunchStrategyAPI = None) -> None:
         super().__init__(token=token)
         self._chain = chain
         self._db = db
+        if launch_strategy is None:
+            launch_strategy = FromGenesisLaunchStrategy(db, chain)
+
+        self._launch_strategy = launch_strategy
         self.peer = peer
         max_pending_headers = peer.max_headers_fetch * 8
         self._fetched_headers = asyncio.Queue(max_pending_headers)
@@ -112,9 +119,9 @@ class SkeletonSyncer(BaseService, Generic[TChainPeer]):
     async def _run(self) -> None:
         self.run_daemon_task(self._display_stats())
         await self.wait(self._quietly_fetch_full_skeleton())
-        self.logger.debug("Skeleton %s stopped responding, waiting for sync to complete", self.peer)
+        self.logger.debug2("Skeleton %s stopped responding, pausing for headers to emit", self.peer)
         await self.wait(self._fetched_headers.join())
-        self.logger.debug("Skeleton %s emitted all headers", self.peer)
+        self.logger.debug2("Skeleton %s emitted all headers", self.peer)
 
     async def _display_stats(self) -> None:
         queue = self._fetched_headers
@@ -131,10 +138,8 @@ class SkeletonSyncer(BaseService, Generic[TChainPeer]):
                 self.peer,
                 exc,
             )
-            await self.peer.disconnect(DisconnectReason.subprotocol_error)
-        except TimeoutError:
+        except asyncio.TimeoutError:
             self.logger.warning("Timeout waiting for header batch from %s, halting sync", self.peer)
-            await self.peer.disconnect(DisconnectReason.timeout)
 
     async def _fetch_full_skeleton(self) -> None:
         """
@@ -172,7 +177,7 @@ class SkeletonSyncer(BaseService, Generic[TChainPeer]):
                 await self.wait(asyncio.gather(*validate_pair_coros, loop=self.get_event_loop()))
             except ValidationError as e:
                 self.logger.warning(
-                    "Received an invalid header pair from %s, disconnecting: %s",
+                    "Received an invalid header pair from %s: %s",
                     peer,
                     e,
                 )
@@ -206,7 +211,7 @@ class SkeletonSyncer(BaseService, Generic[TChainPeer]):
                     raise ValidationError(f"Found empty header segment in {segments}")
 
             # prepare for the next request
-            start_num = previous_tail_header.block_number + self._skip_length - 1
+            start_num = BlockNumber(previous_tail_header.block_number + self._skip_length - 1)
 
         await self._get_final_headers(peer, previous_tail_header)
 
@@ -214,7 +219,7 @@ class SkeletonSyncer(BaseService, Generic[TChainPeer]):
         while self.is_operational:
             final_headers = await self._fetch_headers_from(
                 peer,
-                previous_tail_header.block_number + 1,
+                BlockNumber(previous_tail_header.block_number + 1),
                 skip=0,
             )
             if len(final_headers) == 0:
@@ -229,7 +234,8 @@ class SkeletonSyncer(BaseService, Generic[TChainPeer]):
             previous_tail_header = final_headers[-1]
 
     async def _find_newest_matching_skeleton_header(self, peer: TChainPeer) -> BlockHeader:
-        start_num = await self._get_starting_block_num()
+        start_num = await self.wait(self._launch_strategy.get_starting_block_number())
+
         # after returning this header, we request the next gap, and prefer that one header
         # is new to us, which may be the next header in this mini-skeleton. (hence the -1 below)
         skip = MAX_HEADERS_FETCH - 1
@@ -243,7 +249,7 @@ class SkeletonSyncer(BaseService, Generic[TChainPeer]):
         # check the first returned value
         first = skeleton_launch_headers[0]
 
-        first_is_present = await self.wait(self._db.coro_header_exists(first.hash))
+        first_is_present = await self.wait(self._is_header_imported(first))
 
         if not first_is_present:
             await self._log_ancester_failure(peer, first)
@@ -252,7 +258,7 @@ class SkeletonSyncer(BaseService, Generic[TChainPeer]):
             return skeleton_launch_headers[0]
         else:
             for parent, child in sliding_window(2, skeleton_launch_headers):
-                is_present = await self.wait(self._db.coro_header_exists(child.hash))
+                is_present = await self.wait(self._is_header_imported(child))
                 if not is_present:
                     return parent
             else:
@@ -260,11 +266,10 @@ class SkeletonSyncer(BaseService, Generic[TChainPeer]):
                 # Return the newest one
                 return skeleton_launch_headers[-1]
 
-    async def _should_skip_header(self, header: BlockHeader) -> bool:
+    async def _is_header_imported(self, header: BlockHeader) -> bool:
         """
-        Should we skip trying to import this header?
+        Typically used to decide if we should skip trying to import this header.
         Return True if the syncing of header appears to be complete.
-        This is fairly relaxed about the definition, preferring speed over slow precision.
         """
         if not await self._db.coro_header_exists(header.hash):
             return False
@@ -298,7 +303,7 @@ class SkeletonSyncer(BaseService, Generic[TChainPeer]):
         # This next gap will have at least one header that's new to us, because it overlaps
         # with the skeleton header that is next in the previous skeleton request, and
         # we chose the starting skeleton header so it goes past our canonical head
-        start_num = newest_matching_header.block_number + 1
+        start_num = BlockNumber(newest_matching_header.block_number + 1)
         launch_headers = await self._fetch_headers_from(peer, start_num, skip=0)
 
         if len(launch_headers) == 0:
@@ -308,7 +313,7 @@ class SkeletonSyncer(BaseService, Generic[TChainPeer]):
 
         # identify headers that are not already stored locally
         completed_headers, new_headers = await self.wait(
-            skip_complete_headers(launch_headers, self._should_skip_header)
+            skip_complete_headers(launch_headers, self._is_header_imported)
         )
 
         if completed_headers:
@@ -336,7 +341,6 @@ class SkeletonSyncer(BaseService, Generic[TChainPeer]):
                 raise ValidationError(
                     f"First header {new_headers[0]} did not have parent in DB"
                 ) from exc
-
             # validate new headers against the parent in the database
             await self.wait(self._chain.coro_validate_chain(
                 launch_parent,
@@ -379,7 +383,7 @@ class SkeletonSyncer(BaseService, Generic[TChainPeer]):
         gap_parent = pairs[gap_index][-1]
         gap_child = pairs[gap_index + 1][0]
         # request the gap's headers from the skeleton peer
-        start_num = gap_parent.block_number + 1
+        start_num = BlockNumber(gap_parent.block_number + 1)
         max_headers = gap_child.block_number - gap_parent.block_number - 1
         gap_headers = await self._fetch_headers_from(peer, start_num, max_headers, skip=0)
 
@@ -419,15 +423,6 @@ class SkeletonSyncer(BaseService, Generic[TChainPeer]):
                 pairs[gap_index + 2:],
             ))
 
-    async def _get_starting_block_num(self) -> BlockNumber:
-        head = await self.wait(self._db.coro_get_canonical_head())
-
-        # When we start the sync with a peer, we always request up to MAX_REORG_DEPTH extra
-        # headers before our current head's number, in case there were chain reorgs since the last
-        # time _sync() was called. All of the extra headers that are already present in our DB
-        # will be discarded so we don't unnecessarily process them again.
-        return max(GENESIS_BLOCK_NUMBER, head.block_number - self.max_reorg_depth)
-
     async def _fetch_headers_from(
             self,
             peer: TChainPeer,
@@ -452,7 +447,7 @@ class SkeletonSyncer(BaseService, Generic[TChainPeer]):
         try:
             self.logger.debug("Requsting chain of headers from %s starting at #%d", peer, start_at)
 
-            headers = await self.wait(peer.requests.get_block_headers(
+            headers = await self.wait(peer.chain_api.get_block_headers(
                 start_at,
                 header_limit,
                 derived_skip,
@@ -461,25 +456,23 @@ class SkeletonSyncer(BaseService, Generic[TChainPeer]):
 
             self.logger.debug2('sync received new headers: %s', headers)
         except PeerConnectionLost:
-            self.logger.debug("Lost connection to %s while retrieving headers, aborting sync", peer)
+            self.logger.debug("Lost connection to %s while retrieving headers", peer)
             return tuple()
         except OperationCancelled:
             self.logger.info("Skeleteon sync with %s cancelled", peer)
             return tuple()
-        except TimeoutError:
-            self.logger.warning("Timeout waiting for header batch from %s, aborting sync", peer)
-            await peer.disconnect(DisconnectReason.timeout)
+        except asyncio.TimeoutError:
+            self.logger.debug("Timeout waiting for headers (skip=%s) from %s", skip, peer)
             return tuple()
         except ValidationError as err:
             self.logger.warning(
-                "Invalid header response sent by peer %s disconnecting: %s",
+                "Invalid header response sent by peer %s: %s",
                 peer, err,
             )
-            await peer.disconnect(DisconnectReason.subprotocol_error)
             return tuple()
 
         if not headers:
-            self.logger.debug("Got no new headers from %s, exiting skeleton sync", peer)
+            self.logger.debug2("Got no new headers from %s, exiting skeleton sync", peer)
             return tuple()
         else:
             return headers
@@ -552,7 +545,7 @@ class _PeerBehind(Exception):
     pass
 
 
-HeaderStitcher = OrderedTaskPreparation[BlockHeader, Hash32, OrderedTaskPreparation.NoPrerequisites]
+HeaderStitcher = OrderedTaskPreparation[BlockHeader, Hash32, NoPrerequisites]
 
 
 class HeaderMeatSyncer(BaseService, PeerSubscriber, Generic[TChainPeer]):
@@ -579,7 +572,9 @@ class HeaderMeatSyncer(BaseService, PeerSubscriber, Generic[TChainPeer]):
         )
 
         # queue up idle peers, ordered by speed that they return block bodies
-        self._waiting_peers: WaitingPeers[TChainPeer] = WaitingPeers(BaseBlockHeaders)
+        self._waiting_peers: WaitingPeers[TChainPeer] = WaitingPeers(
+            (ETHBlockHeaders, LESBlockHEaders),
+        )
         self._peer_pool = peer_pool
 
     def register_peer(self, peer: BasePeer) -> None:
@@ -597,9 +592,20 @@ class HeaderMeatSyncer(BaseService, PeerSubscriber, Generic[TChainPeer]):
         :param gap_length: how long is the header gap
         :param skeleton_peer: the peer that provided the parent_header - will not use to fill gaps
         """
-        await self.wait(self._filler_header_tasks.add((
-            (parent_header, gap_length, skeleton_peer),
-        )))
+        try:
+            await self.wait(self._filler_header_tasks.add((
+                (parent_header, gap_length, skeleton_peer),
+            )))
+        except ValidationError as exc:
+            self.logger.debug(
+                "Tried to re-add a duplicate list of headers to the download queue: %s",
+                exc,
+            )
+            # Since the task is already queued up, there is no value in
+            # re-adding it, so it is safe to drop the exception after logging
+            # it. One example of a time it happens is when the skeleton sync
+            # restarts, and happens to choose the same skeleton structure. It
+            # tries to reinsert the same duplicate meat filler tasks.
 
     async def _run(self) -> None:
         self.run_daemon_task(self._display_stats())
@@ -693,7 +699,11 @@ class HeaderMeatSyncer(BaseService, PeerSubscriber, Generic[TChainPeer]):
             raise ValidationError(
                 f"Can't request {length} headers, because peer maximum is {peer.max_headers_fetch}"
             )
-        headers = await self._request_headers(peer, parent_header.block_number + 1, length)
+        headers = await self._request_headers(
+            peer,
+            BlockNumber(parent_header.block_number + 1),
+            length,
+        )
         if not headers:
             return tuple()
         elif headers[0].parent_hash != parent_header.hash:
@@ -725,12 +735,11 @@ class HeaderMeatSyncer(BaseService, PeerSubscriber, Generic[TChainPeer]):
             except ValidationError as e:
                 self.logger.warning(
                     "Received invalid header segment from %s against known parent %s, "
-                    "disconnecting: %s",
+                    ": %s",
                     peer,
                     parent_header,
                     e,
                 )
-                await peer.disconnect(DisconnectReason.subprotocol_error)
                 return tuple()
             else:
                 # stitch headers together in order, ignoring duplicates
@@ -741,8 +750,8 @@ class HeaderMeatSyncer(BaseService, PeerSubscriber, Generic[TChainPeer]):
             self, peer: TChainPeer, start_at: BlockNumber, length: int) -> Tuple[BlockHeader, ...]:
         self.logger.debug("Requesting %d headers from %s", length, peer)
         try:
-            return await peer.requests.get_block_headers(start_at, length, skip=0, reverse=False)
-        except TimeoutError as err:
+            return await peer.chain_api.get_block_headers(start_at, length, skip=0, reverse=False)
+        except asyncio.TimeoutError as err:
             self.logger.debug("Timed out requesting %d headers from %s", length, peer)
             return tuple()
         except CancelledError:
@@ -783,6 +792,7 @@ class BaseHeaderChainSyncer(BaseService, HeaderSyncerAPI, Generic[TChainPeer]):
                  chain: AsyncChainAPI,
                  db: BaseAsyncHeaderDB,
                  peer_pool: BaseChainPeerPool,
+                 launch_strategy: SyncLaunchStrategyAPI = None,
                  token: CancelToken = None) -> None:
         super().__init__(token)
         self._db = db
@@ -791,6 +801,11 @@ class BaseHeaderChainSyncer(BaseService, HeaderSyncerAPI, Generic[TChainPeer]):
         self._tip_monitor = self.tip_monitor_class(peer_pool, token=self.cancel_token)
         self._last_target_header_hash: Hash32 = None
         self._skeleton: SkeletonSyncer[TChainPeer] = None
+
+        if launch_strategy is None:
+            launch_strategy = FromGenesisLaunchStrategy(self._db, self._chain)
+
+        self._launch_strategy = launch_strategy
 
         # Track if there is capacity for syncing more headers
         self._buffer_capacity = asyncio.Event()
@@ -847,7 +862,7 @@ class BaseHeaderChainSyncer(BaseService, HeaderSyncerAPI, Generic[TChainPeer]):
         if not self._is_syncing_skeleton and self._last_target_header_hash is None:
             raise ValidationError("Cannot check the target hash before the first sync has started")
         elif self._is_syncing_skeleton:
-            return self._skeleton.peer.head_hash
+            return self._skeleton.peer.head_info.head_hash
         else:
             return self._last_target_header_hash
 
@@ -886,6 +901,7 @@ class BaseHeaderChainSyncer(BaseService, HeaderSyncerAPI, Generic[TChainPeer]):
             self._db,
             peer,
             self.cancel_token,
+            self._launch_strategy,
         )
         self.run_child_service(self._skeleton)
         await self._skeleton.events.started.wait()
@@ -897,8 +913,8 @@ class BaseHeaderChainSyncer(BaseService, HeaderSyncerAPI, Generic[TChainPeer]):
             if self._skeleton.is_operational:
                 self._skeleton.cancel_nowait()
         finally:
-            self.logger.debug("Skeleton sync with %s ended", peer)
-            self._last_target_header_hash = peer.head_hash
+            self.logger.debug2("Skeleton sync with %s ended", peer)
+            self._last_target_header_hash = peer.head_info.head_hash
             self._skeleton = None
 
     @property
@@ -961,15 +977,15 @@ class BaseHeaderChainSyncer(BaseService, HeaderSyncerAPI, Generic[TChainPeer]):
             await self._buffer_capacity.wait()
 
     async def _validate_peer_is_ahead(self, peer: BaseChainPeer) -> None:
-        head = await self.wait(self._db.coro_get_canonical_head())
-        head_td = await self.wait(self._db.coro_get_score(head.hash))
-        if peer.head_td <= head_td:
+        head = await self._db.coro_get_canonical_head()
+        head_td = await self._db.coro_get_score(head.hash)
+        if peer.head_info.head_td <= head_td:
             self.logger.debug(
                 "Head TD (%d) announced by %s not higher than ours (%d), not syncing",
-                peer.head_td, peer, head_td)
+                peer.head_info.head_td, peer, head_td)
             raise _PeerBehind(f"{peer} is behind us, not a valid target for sync")
         else:
             self.logger.debug(
                 "%s announced Head TD %d, which is higher than ours (%d), starting sync",
-                peer, peer.head_td, head_td)
+                peer, peer.head_info.head_td, head_td)
             pass

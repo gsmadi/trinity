@@ -14,6 +14,7 @@ from p2p.abc import TransportAPI
 from p2p.constants import P2P_PROTOCOL_COMMAND_LENGTH
 from p2p.disconnect import DisconnectReason as _DisconnectReason
 from p2p.exceptions import MalformedMessage
+from p2p.receipt import HandshakeReceipt
 from p2p.typing import Capabilities, Payload
 
 from p2p.protocol import (
@@ -118,7 +119,7 @@ class BaseP2PProtocol(Protocol):
         self.transport.send(header, body)
 
     def send_disconnect(self, reason: _DisconnectReason) -> None:
-        msg: Dict[str, Any] = {"reason": reason}
+        msg: Dict[str, Any] = {"reason": reason.value}
         header, body = Disconnect(
             self.cmd_id_offset,
             self.snappy_support
@@ -148,3 +149,22 @@ class P2PProtocolV4(BaseP2PProtocol):
 
 class P2PProtocol(BaseP2PProtocol):
     version = 5
+
+
+class DevP2PReceipt(HandshakeReceipt):
+    """
+    Record of the handshake data from the core `p2p` protocol handshake.
+    """
+    def __init__(self,
+                 protocol: BaseP2PProtocol,
+                 version: int,
+                 client_version_string: str,
+                 capabilities: Capabilities,
+                 listen_port: int,
+                 remote_public_key: bytes) -> None:
+        super().__init__(protocol)
+        self.version = version
+        self.client_version_string = client_version_string
+        self.capabilities = capabilities
+        self.listen_port = listen_port
+        self.remote_public_key = remote_public_key

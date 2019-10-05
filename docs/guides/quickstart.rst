@@ -113,6 +113,14 @@ After the image has been successfully created, we can run it by invoking:
 
   docker run -it ethereum/trinity:my-own-version
 
+
+Installing on DappNode
+----------------------
+
+Trinity is available as a DappNode package. Just search for `trinity.public.dappnode.eth`, install
+the package and it will immediately start syncing. Head over to the
+:doc:`Running Trinity on DappNode </guides/running_trinity_on_dappnode>` for more tips and tricks.
+
 Running Trinity
 ~~~~~~~~~~~~~~~
 
@@ -143,7 +151,7 @@ to help us getting that bug fixed.
       INFO  05-29 01:57:07      server  enode://09d34ecb0de1806ab0e68cb2d822b967292dc021df06aab9a55aa4d2e1b2e04ae73560137407a48073286026e12dd60d265a1b1ae0505e44e60d55cea9c7b100@0.0.0.0:30303
       INFO  05-29 01:57:07      server  network: 1
       INFO  05-29 01:57:07        peer  Running PeerPool...
-      INFO  05-29 01:57:07        sync  Starting fast-sync; current head: #0
+      INFO  05-29 01:57:07        sync  Starting beam-sync; current head: #0
 
 Once Trinity successfully connected to other peers we should see it starting to sync the chain.
 
@@ -160,7 +168,7 @@ What's next?
 ~~~~~~~~~~~~
 
 Now that we've got things running, there's a lot ahead to learn. Check out the existing guides on
-Trinity's general :doc:`Architecture </guides/architecture>`, :doc:`Writing Plugins </guides/writing_plugins>`
+Trinity's general :doc:`Architecture </guides/architecture>`, :doc:`Writing Components </guides/writing_components>`
 or scan the :doc:`Cookbook </cookbook>` for short recipes to learn how to:
 
 - :ref:`Run Trinity as a light client<cookbook_recipe_running_as_a_light_client>`

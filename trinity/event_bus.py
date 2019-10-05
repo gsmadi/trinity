@@ -23,23 +23,23 @@ from trinity.events import (
     EventBusConnected,
 )
 from trinity.extensibility import (
-    BasePlugin,
-    PluginManager,
+    BaseComponent,
+    ComponentManager,
     TrinityBootInfo,
 )
 
 
-class PluginManagerService(BaseService):
+class ComponentManagerService(BaseService):
     _endpoint: EndpointAPI
 
     def __init__(self,
                  trinity_boot_info: TrinityBootInfo,
-                 plugins: Sequence[Type[BasePlugin]],
+                 components: Sequence[Type[BaseComponent]],
                  kill_trinity_fn: Callable[[str], Any],
                  cancel_token: CancelToken = None,
                  loop: asyncio.AbstractEventLoop = None) -> None:
         self._boot_info = trinity_boot_info
-        self._plugins = plugins
+        self._components = components
         self._kill_trinity_fn = kill_trinity_fn
         super().__init__(cancel_token, loop)
 
@@ -56,18 +56,18 @@ class PluginManagerService(BaseService):
             self.run_daemon_task(self._track_and_propagate_available_endpoints())
             self.run_daemon_task(self._handle_shutdown_request())
 
-            # start the plugin manager
-            self.plugin_manager = PluginManager(endpoint, self._plugins)
-            self.plugin_manager.prepare(self._boot_info)
+            # start the component manager
+            self.component_manager = ComponentManager(endpoint, self._components)
+            self.component_manager.prepare(self._boot_info)
             await self.cancellation()
 
     async def _handle_shutdown_request(self) -> None:
-        req = await self._endpoint.wait_for(ShutdownRequest)
+        req = await self.wait(self._endpoint.wait_for(ShutdownRequest))
         self._kill_trinity_fn(req.reason)
         self.cancel_nowait()
 
     async def _cleanup(self) -> None:
-        self.plugin_manager.shutdown_blocking()
+        self.component_manager.shutdown_blocking()
 
     _available_endpoints: Tuple[ConnectionConfig, ...] = ()
 
@@ -151,7 +151,7 @@ class AsyncioEventBusService(BaseService):
                 for connection_config in ev.available_endpoints[index:]
                 if not self._endpoint.is_connected_to(connection_config.name)
             )
-            self._endpoint.logger.info(
+            self._endpoint.logger.debug(
                 "EventBus Endpoint %s connecting to other Endpoints %s",
                 self._endpoint.name,
                 ','.join((config.name for config in endpoints_to_connect_to)),

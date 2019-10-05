@@ -1,9 +1,7 @@
 import asyncio
 import hmac
-import logging
 import secrets
 import struct
-from typing import cast
 
 import sha3
 
@@ -16,9 +14,10 @@ from cancel_token import CancelToken
 
 from eth_keys import datatypes
 
-from eth_utils import big_endian_to_int
-
-from eth.tools.logging import ExtendedDebugLogger
+from eth_utils import (
+    big_endian_to_int,
+    get_extended_debug_logger,
+)
 
 from p2p import auth
 from p2p._utils import (
@@ -47,10 +46,18 @@ from p2p.exceptions import (
     UnreachablePeer,
 )
 from p2p.kademlia import Address, Node
+from p2p.session import Session
+from p2p.transport_state import TransportState
 
 
 class Transport(TransportAPI):
-    logger = cast(ExtendedDebugLogger, logging.getLogger('p2p.connection.Transport'))
+    logger = get_extended_debug_logger('p2p.transport.Transport')
+
+    # This status flag allows those managing a `Transport` to determine the
+    # proper cancellation strategy if the transport is mid-read.  Hard
+    # cancellations are allowed for both `IDLE` and `HEADER`.  A hard
+    # cancellation during `BODY` will leave the transport in a corrupt state.
+    read_state: TransportState = TransportState.IDLE
 
     def __init__(self,
                  remote: NodeAPI,
@@ -62,6 +69,7 @@ class Transport(TransportAPI):
                  egress_mac: sha3.keccak_256,
                  ingress_mac: sha3.keccak_256) -> None:
         self.remote = remote
+        self.session = Session(self.remote)
 
         self._private_key = private_key
 
@@ -193,6 +201,9 @@ class Transport(TransportAPI):
         auth_ack_msg = responder.create_auth_ack_message(responder_nonce)
         auth_ack_ciphertext = responder.encrypt_auth_ack_message(auth_ack_msg)
 
+        if writer.transport.is_closing() or reader.at_eof():
+            raise HandshakeFailure(f"Connection to {initiator_remote} is closing")
+
         # Use the `writer` to send the reply to the remote
         writer.write(auth_ack_ciphertext)
         await token.cancellable_wait(writer.drain())
@@ -230,13 +241,36 @@ class Transport(TransportAPI):
                 timeout=CONN_IDLE_TIMEOUT,
             )
         except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError) as err:
-            raise PeerConnectionLost from err
+            raise PeerConnectionLost(f"Lost connection to {self.remote}") from err
 
     def write(self, data: bytes) -> None:
         self._writer.write(data)
 
     async def recv(self, token: CancelToken) -> bytes:
-        header_data = await self.read(HEADER_LEN + MAC_LEN, token)
+        # Check that Transport read state is IDLE.
+        if self.read_state is not TransportState.IDLE:
+            # This is logged at INFO level because it indicates we are not
+            # properly managing the Transport and are interrupting it mid-read
+            # somewhere.
+            self.logger.info(
+                'Corrupted transport: %s - state=%s',
+                self,
+                self.read_state.name,
+            )
+            raise Exception(f"Corrupted transport: {self} - state={self.read_state.name}")
+
+        # Set status to indicate we are waiting to read the message header
+        self.read_state = TransportState.HEADER
+
+        try:
+            header_data = await self.read(HEADER_LEN + MAC_LEN, token)
+        except asyncio.CancelledError:
+            self.logger.debug('Transport cancelled during header read. resetting to IDLE state')
+            self.read_state = TransportState.IDLE
+            raise
+
+        # Set status to indicate we are waiting to read the message body
+        self.read_state = TransportState.BODY
         try:
             header = self._decrypt_header(header_data)
         except DecryptionError as err:
@@ -259,15 +293,16 @@ class Transport(TransportAPI):
             )
             raise MalformedMessage from err
 
+        # Reset status back to IDLE
+        self.read_state = TransportState.IDLE
         return msg
 
     def send(self, header: bytes, body: bytes) -> None:
         cmd_id = get_devp2p_cmd_id(body)
         self.logger.debug2("Sending msg with cmd id %d to %s", cmd_id, self)
         if self.is_closing:
-            self.logger.error(
+            raise PeerConnectionLost(
                 "Attempted to send msg with cmd id %d to disconnected peer %s", cmd_id, self)
-            return
 
         self.write(self._encrypt(header, body))
 

@@ -10,6 +10,8 @@ from lahja import EndpointAPI
 
 from cancel_token import CancelToken
 
+from eth_typing import BlockNumber
+
 from eth_utils import to_bytes
 
 from eth_keys import keys
@@ -21,6 +23,7 @@ from eth.constants import GENESIS_DIFFICULTY, GENESIS_BLOCK_NUMBER
 from eth.chains.mainnet import MAINNET_VM_CONFIGURATION
 
 from p2p import kademlia
+from p2p.abc import HandshakerAPI
 from p2p.tools.factories import PeerPairFactory
 
 from trinity.constants import MAINNET_NETWORK_ID
@@ -32,8 +35,10 @@ from trinity.protocol.eth.handshaker import ETHHandshaker
 from trinity.protocol.eth.peer import ETHPeer, ETHPeerFactory
 from trinity.protocol.eth.proto import ETHHandshakeParams, ETHProtocol
 
+from trinity.protocol.les.handshaker import LESV2Handshaker, LESV1Handshaker
 from trinity.protocol.les.peer import LESPeer, LESPeerFactory
 from trinity.protocol.les.proto import LESHandshakeParams, LESProtocol, LESProtocolV2
+
 
 try:
     import factory
@@ -74,14 +79,17 @@ class AsyncHeaderDBFactory(factory.Factory):
                 model_class: Type[AsyncHeaderDB],
                 *args: Any,
                 **kwargs: Any) -> AsyncHeaderDB:
-        headerdb = model_class(*args, **kwargs)
         from eth.chains.base import Chain
         from eth.tools.builder.chain import build, latest_mainnet_at, genesis
+
+        genesis_params = kwargs.pop('genesis_params', None)
+
+        headerdb = model_class(*args, **kwargs)
 
         build(
             Chain,
             latest_mainnet_at(0),
-            genesis(db=headerdb.db),
+            genesis(db=headerdb.db, params=genesis_params),
         )
         return headerdb
 
@@ -112,7 +120,8 @@ class ETHHandshakeParamsFactory(factory.Factory):
     def from_headerdb(cls, headerdb: HeaderDB, **kwargs: Any) -> ETHHandshakeParams:
         head = headerdb.get_canonical_head()
         head_score = headerdb.get_score(head.hash)
-        genesis = headerdb.get_canonical_block_header_by_number(GENESIS_BLOCK_NUMBER)
+        # TODO: https://github.com/ethereum/py-evm/issues/1847
+        genesis = headerdb.get_canonical_block_header_by_number(BlockNumber(GENESIS_BLOCK_NUMBER))
         return cls(
             head_hash=head.hash,
             genesis_hash=genesis.hash,
@@ -142,8 +151,14 @@ def ETHPeerPairFactory(*,
                        ) -> AsyncContextManager[Tuple[ETHPeer, ETHPeer]]:
     if alice_peer_context is None:
         alice_peer_context = ChainContextFactory()
+
     if bob_peer_context is None:
-        bob_peer_context = ChainContextFactory()
+        alice_genesis = alice_peer_context.headerdb.get_canonical_block_header_by_number(
+            BlockNumber(GENESIS_BLOCK_NUMBER),
+        )
+        bob_peer_context = ChainContextFactory(
+            headerdb__genesis_params={'timestamp': alice_genesis.timestamp},
+        )
 
     return cast(AsyncContextManager[Tuple[ETHPeer, ETHPeer]], PeerPairFactory(
         alice_peer_context=alice_peer_context,
@@ -169,7 +184,7 @@ class LESHandshakeParamsFactory(factory.Factory):
     network_id = MAINNET_NETWORK_ID
     head_td = GENESIS_DIFFICULTY
     head_hash = MAINNET_GENESIS_HASH
-    head_num = GENESIS_BLOCK_NUMBER
+    head_number = GENESIS_BLOCK_NUMBER
     genesis_hash = MAINNET_GENESIS_HASH
     serve_headers = True
     serve_chain_since = 0
@@ -185,12 +200,31 @@ class LESHandshakeParamsFactory(factory.Factory):
     )
 
 
+class LESV1HandshakerFactory(factory.Factory):
+    class Meta:
+        model = LESV1Handshaker
+
+    handshake_params = factory.SubFactory(LESHandshakeParamsFactory, version=LESProtocol.version)
+
+
+class LESV2HandshakerFactory(factory.Factory):
+    class Meta:
+        model = LESV2Handshaker
+
+    handshake_params = factory.SubFactory(LESHandshakeParamsFactory, version=LESProtocolV2.version)
+
+
 class LESV1Peer(LESPeer):
     supported_sub_protocols = (LESProtocol,)  # type: ignore
 
 
 class LESV1PeerFactory(LESPeerFactory):
     peer_class = LESV1Peer
+
+    async def get_handshakers(self) -> Tuple[HandshakerAPI, ...]:
+        return (
+            LESV1Handshaker(LESHandshakeParamsFactory(version=1)),
+        )
 
 
 def LESV1PeerPairFactory(*,
@@ -204,13 +238,18 @@ def LESV1PeerPairFactory(*,
                          bob_client_version: str = 'bob',
                          cancel_token: CancelToken = None,
                          event_bus: EndpointAPI = None,
-                         ) -> AsyncContextManager[Tuple[LESPeer, LESPeer]]:
+                         ) -> AsyncContextManager[Tuple[LESV1Peer, LESV1Peer]]:
     if alice_peer_context is None:
         alice_peer_context = ChainContextFactory()
     if bob_peer_context is None:
-        bob_peer_context = ChainContextFactory()
+        alice_genesis = alice_peer_context.headerdb.get_canonical_block_header_by_number(
+            BlockNumber(GENESIS_BLOCK_NUMBER),
+        )
+        bob_peer_context = ChainContextFactory(
+            headerdb__genesis_params={'timestamp': alice_genesis.timestamp},
+        )
 
-    return cast(AsyncContextManager[Tuple[LESPeer, LESPeer]], PeerPairFactory(
+    return cast(AsyncContextManager[Tuple[LESV1Peer, LESV1Peer]], PeerPairFactory(
         alice_peer_context=alice_peer_context,
         alice_peer_factory_class=LESV1PeerFactory,
         bob_peer_context=bob_peer_context,
@@ -241,7 +280,12 @@ def LESV2PeerPairFactory(*,
     if alice_peer_context is None:
         alice_peer_context = ChainContextFactory()
     if bob_peer_context is None:
-        bob_peer_context = ChainContextFactory()
+        alice_genesis = alice_peer_context.headerdb.get_canonical_block_header_by_number(
+            BlockNumber(GENESIS_BLOCK_NUMBER),
+        )
+        bob_peer_context = ChainContextFactory(
+            headerdb__genesis_params={'timestamp': alice_genesis.timestamp},
+        )
 
     return cast(AsyncContextManager[Tuple[LESPeer, LESPeer]], PeerPairFactory(
         alice_peer_context=alice_peer_context,

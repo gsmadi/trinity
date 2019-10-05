@@ -7,17 +7,14 @@ from typing import (
 
 from lahja import EndpointAPI
 
-from eth.abc import (
-    AtomicDatabaseAPI,
-    ChainAPI,
-)
+from eth.abc import AtomicDatabaseAPI
 
 from p2p.peer_pool import BasePeerPool
 from p2p.service import (
     BaseService,
 )
-from p2p._utils import ensure_global_asyncio_executor
 
+from trinity.chains.base import AsyncChainAPI
 from trinity.chains.full import FullChain
 from trinity.db.manager import DBClient
 from trinity.db.eth1.header import (
@@ -86,7 +83,7 @@ class Node(BaseService, Generic[TPeer]):
         return self._chain_config
 
     @abstractmethod
-    def get_chain(self) -> ChainAPI:
+    def get_chain(self) -> AsyncChainAPI:
         ...
 
     def get_full_chain(self) -> FullChain:
@@ -127,9 +124,6 @@ class Node(BaseService, Generic[TPeer]):
         return self._headerdb
 
     async def _run(self) -> None:
-        # The `networking` process creates a process pool executor to offload cpu intensive
-        # tasks. We should revisit that when we move the sync in its own process
-        ensure_global_asyncio_executor()
         self.run_daemon_task(self.handle_network_id_requests())
         self.run_daemon(self.get_p2p_server())
         self.run_daemon(self.get_event_server())

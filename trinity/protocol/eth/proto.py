@@ -1,7 +1,6 @@
 from typing import (
-    List,
     NamedTuple,
-    Tuple,
+    Sequence,
     TYPE_CHECKING,
     Union,
 )
@@ -11,19 +10,24 @@ from eth_typing import (
     BlockNumber,
 )
 
-from eth_utils import ValidationError
+from eth_utils import (
+    ValidationError,
+    get_extended_debug_logger,
+)
 
 from lahja import EndpointAPI
 
-from eth.rlp.headers import BlockHeader
-from eth.rlp.receipts import Receipt
-from eth.rlp.transactions import BaseTransactionFields
+from eth.abc import (
+    BlockHeaderAPI,
+    ReceiptAPI,
+    SignedTransactionAPI,
+)
 
 from lahja import (
     BroadcastConfig,
 )
 
-from p2p.abc import NodeAPI
+from p2p.abc import SessionAPI
 from p2p.protocol import Protocol
 
 from trinity.rlp.block_body import BlockBody
@@ -50,8 +54,6 @@ from .events import (
     SendTransactionsEvent,
 )
 
-from trinity._utils.logging import HasExtendedDebugLogger
-
 if TYPE_CHECKING:
     from .peer import ETHPeer  # noqa: F401
 
@@ -64,8 +66,7 @@ class ETHHandshakeParams(NamedTuple):
     version: int
 
 
-# HasExtendedDebugLogger must come before Protocol so there's self.logger.debug2()
-class ETHProtocol(HasExtendedDebugLogger, Protocol):
+class ETHProtocol(Protocol):
     name = 'eth'
     version = 63
     _commands = (
@@ -81,6 +82,8 @@ class ETHProtocol(HasExtendedDebugLogger, Protocol):
     cmd_length = 17
 
     peer: 'ETHPeer'
+
+    logger = get_extended_debug_logger('trinity.protocol.eth.proto.ETHProtocol')
 
     def send_handshake(self, handshake_params: ETHHandshakeParams) -> None:
         if handshake_params.version != self.version:
@@ -102,12 +105,12 @@ class ETHProtocol(HasExtendedDebugLogger, Protocol):
     #
     # Node Data
     #
-    def send_get_node_data(self, node_hashes: Tuple[Hash32, ...]) -> None:
+    def send_get_node_data(self, node_hashes: Sequence[Hash32]) -> None:
         cmd = GetNodeData(self.cmd_id_offset, self.snappy_support)
         header, body = cmd.encode(node_hashes)
         self.transport.send(header, body)
 
-    def send_node_data(self, nodes: Tuple[bytes, ...]) -> None:
+    def send_node_data(self, nodes: Sequence[bytes]) -> None:
         cmd = NodeData(self.cmd_id_offset, self.snappy_support)
         header, body = cmd.encode(nodes)
         self.transport.send(header, body)
@@ -137,7 +140,7 @@ class ETHProtocol(HasExtendedDebugLogger, Protocol):
         header, body = cmd.encode(data)
         self.transport.send(header, body)
 
-    def send_block_headers(self, headers: Tuple[BlockHeader, ...]) -> None:
+    def send_block_headers(self, headers: Sequence[BlockHeaderAPI]) -> None:
         cmd = BlockHeaders(self.cmd_id_offset, self.snappy_support)
         header, body = cmd.encode(headers)
         self.transport.send(header, body)
@@ -145,12 +148,12 @@ class ETHProtocol(HasExtendedDebugLogger, Protocol):
     #
     # Block Bodies
     #
-    def send_get_block_bodies(self, block_hashes: Tuple[Hash32, ...]) -> None:
+    def send_get_block_bodies(self, block_hashes: Sequence[Hash32]) -> None:
         cmd = GetBlockBodies(self.cmd_id_offset, self.snappy_support)
         header, body = cmd.encode(block_hashes)
         self.transport.send(header, body)
 
-    def send_block_bodies(self, blocks: List[BlockBody]) -> None:
+    def send_block_bodies(self, blocks: Sequence[BlockBody]) -> None:
         cmd = BlockBodies(self.cmd_id_offset, self.snappy_support)
         header, body = cmd.encode(blocks)
         self.transport.send(header, body)
@@ -158,12 +161,12 @@ class ETHProtocol(HasExtendedDebugLogger, Protocol):
     #
     # Receipts
     #
-    def send_get_receipts(self, block_hashes: Tuple[Hash32, ...]) -> None:
+    def send_get_receipts(self, block_hashes: Sequence[Hash32]) -> None:
         cmd = GetReceipts(self.cmd_id_offset, self.snappy_support)
         header, body = cmd.encode(block_hashes)
         self.transport.send(header, body)
 
-    def send_receipts(self, receipts: List[List[Receipt]]) -> None:
+    def send_receipts(self, receipts: Sequence[Sequence[ReceiptAPI]]) -> None:
         cmd = Receipts(self.cmd_id_offset, self.snappy_support)
         header, body = cmd.encode(receipts)
         self.transport.send(header, body)
@@ -171,9 +174,25 @@ class ETHProtocol(HasExtendedDebugLogger, Protocol):
     #
     # Transactions
     #
-    def send_transactions(self, transactions: List[BaseTransactionFields]) -> None:
+    def send_transactions(self, transactions: Sequence[SignedTransactionAPI]) -> None:
         cmd = Transactions(self.cmd_id_offset, self.snappy_support)
         header, body = cmd.encode(transactions)
+        self.transport.send(header, body)
+
+    #
+    # NewBlock
+    #
+    def send_new_block(self,
+                       block_header: BlockHeaderAPI,
+                       transactions: Sequence[SignedTransactionAPI],
+                       uncles: Sequence[BlockHeaderAPI],
+                       total_difficulty: int) -> None:
+        cmd = NewBlock(self.cmd_id_offset, self.snappy_support)
+        # mypy doesn't recognize the following as a valid `Payload` type
+        header, body = cmd.encode({  # type: ignore
+            'block': (block_header, transactions, uncles),
+            'total_difficulty': total_difficulty,
+        })
         self.transport.send(header, body)
 
 
@@ -184,10 +203,10 @@ class ProxyETHProtocol:
     """
 
     def __init__(self,
-                 remote: NodeAPI,
+                 session: SessionAPI,
                  event_bus: EndpointAPI,
                  broadcast_config: BroadcastConfig):
-        self.remote = remote
+        self.session = session
         self._event_bus = event_bus
         self._broadcast_config = broadcast_config
 
@@ -197,12 +216,12 @@ class ProxyETHProtocol:
     #
     # Node Data
     #
-    def send_get_node_data(self, node_hashes: Tuple[Hash32, ...]) -> None:
+    def send_get_node_data(self, node_hashes: Sequence[Hash32]) -> None:
         raise NotImplementedError("Not yet implemented")
 
-    def send_node_data(self, nodes: Tuple[bytes, ...]) -> None:
+    def send_node_data(self, nodes: Sequence[bytes]) -> None:
         self._event_bus.broadcast_nowait(
-            SendNodeDataEvent(self.remote, nodes),
+            SendNodeDataEvent(self.session, nodes),
             self._broadcast_config,
         )
 
@@ -217,41 +236,41 @@ class ProxyETHProtocol:
             reverse: bool) -> None:
         raise NotImplementedError("Not yet implemented")
 
-    def send_block_headers(self, headers: Tuple[BlockHeader, ...]) -> None:
+    def send_block_headers(self, headers: Sequence[BlockHeaderAPI]) -> None:
         self._event_bus.broadcast_nowait(
-            SendBlockHeadersEvent(self.remote, headers),
+            SendBlockHeadersEvent(self.session, headers),
             self._broadcast_config,
         )
 
     #
     # Block Bodies
     #
-    def send_get_block_bodies(self, block_hashes: Tuple[Hash32, ...]) -> None:
+    def send_get_block_bodies(self, block_hashes: Sequence[Hash32]) -> None:
         raise NotImplementedError("Not yet implemented")
 
-    def send_block_bodies(self, blocks: List[BlockBody]) -> None:
+    def send_block_bodies(self, blocks: Sequence[BlockBody]) -> None:
         self._event_bus.broadcast_nowait(
-            SendBlockBodiesEvent(self.remote, blocks),
+            SendBlockBodiesEvent(self.session, blocks),
             self._broadcast_config,
         )
 
     #
     # Receipts
     #
-    def send_get_receipts(self, block_hashes: Tuple[Hash32, ...]) -> None:
+    def send_get_receipts(self, block_hashes: Sequence[Hash32]) -> None:
         raise NotImplementedError("Not yet implemented")
 
-    def send_receipts(self, receipts: List[List[Receipt]]) -> None:
+    def send_receipts(self, receipts: Sequence[Sequence[ReceiptAPI]]) -> None:
         self._event_bus.broadcast_nowait(
-            SendReceiptsEvent(self.remote, receipts),
+            SendReceiptsEvent(self.session, receipts),
             self._broadcast_config,
         )
 
     #
     # Transactions
     #
-    def send_transactions(self, transactions: List[BaseTransactionFields]) -> None:
+    def send_transactions(self, transactions: Sequence[SignedTransactionAPI]) -> None:
         self._event_bus.broadcast_nowait(
-            SendTransactionsEvent(self.remote, transactions),
+            SendTransactionsEvent(self.session, transactions),
             self._broadcast_config,
         )

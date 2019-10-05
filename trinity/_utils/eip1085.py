@@ -35,6 +35,9 @@ from eth_utils.toolz import (
     sliding_window,
 )
 
+from eth.chains.mainnet import (
+    MainnetDAOValidatorVM
+)
 from eth.typing import (
     AccountDetails,
     GenesisDict,
@@ -50,6 +53,7 @@ from eth.vm.forks import (
     ByzantiumVM,
     ConstantinopleVM,
     PetersburgVM,
+    IstanbulVM,
 )
 
 
@@ -129,8 +133,7 @@ def _extract_vm_config(vm_config: Dict[str, str]) -> Iterable[VMFork]:
         if 'DAOForkBlock' in vm_config:
             dao_fork_block_number = to_int(hexstr=vm_config['DAOForkBlock'])
 
-            HomesteadVM = BaseHomesteadVM.configure(
-                support_dao_fork=True,
+            HomesteadVM = MainnetDAOValidatorVM.configure(
                 _dao_fork_block_number=dao_fork_block_number,
             )
             yield homestead_fork_block, HomesteadVM
@@ -146,6 +149,8 @@ def _extract_vm_config(vm_config: Dict[str, str]) -> Iterable[VMFork]:
         yield to_int(hexstr=vm_config['constantinopleForkBlock']), ConstantinopleVM
     if 'petersburgForkBlock' in vm_config.keys():
         yield to_int(hexstr=vm_config['petersburgForkBlock']), PetersburgVM
+    if 'istanbulForkBlock' in vm_config.keys():
+        yield to_int(hexstr=vm_config['istanbulForkBlock']), IstanbulVM
 
 
 @to_tuple

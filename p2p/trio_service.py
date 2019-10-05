@@ -3,9 +3,7 @@ import functools
 import logging
 import sys
 from types import TracebackType
-from typing import Any, Callable, Awaitable, Optional, Tuple, Type, AsyncIterator
-
-from mypy_extensions import VarArg
+from typing import Any, Callable, Awaitable, List, Optional, Tuple, Type, AsyncIterator
 
 from async_generator import asynccontextmanager
 
@@ -22,6 +20,13 @@ class ServiceException(Exception):
 
 
 class LifecycleError(ServiceException):
+    """
+    Raised when an action would violate the service lifecycle rules.
+    """
+    pass
+
+
+class DaemonTaskExit(ServiceException):
     """
     Raised when an action would violate the service lifecycle rules.
     """
@@ -156,7 +161,7 @@ class ManagerAPI(ABC):
     @trio_typing.takes_callable_and_args
     @abstractmethod
     async def run_task(self,
-                       async_fn: Callable[[VarArg()], Awaitable[Any]],
+                       async_fn: Callable[..., Awaitable[Any]],
                        *args: Any,
                        daemon: bool = False,
                        name: str = None) -> None:
@@ -166,6 +171,44 @@ class ManagerAPI(ABC):
 
         If `daemon == True` then the the task is expected to run indefinitely
         and will trigger cancellation if the task finishes.
+        """
+        ...
+
+    @trio_typing.takes_callable_and_args
+    @abstractmethod
+    async def run_daemon_task(self,
+                              async_fn: Callable[..., Awaitable[Any]],
+                              *args: Any,
+                              name: str = None) -> None:
+        """
+        Run a daemon task in the background.
+
+        Equivalent to `run_task(..., daemon=True)`.
+        """
+        ...
+
+    @abstractmethod
+    def run_child_service(self,
+                          service: ServiceAPI,
+                          daemon: bool = False,
+                          name: str = None) -> "ManagerAPI":
+        """
+        Run a service in the background.  If the function throws an exception it
+        will trigger the parent service to be cancelled and be propogated.
+
+        If `daemon == True` then the the service is expected to run indefinitely
+        and will trigger cancellation if the service finishes.
+        """
+        ...
+
+    @abstractmethod
+    def run_daemon_child_service(self,
+                                 service: ServiceAPI,
+                                 name: str = None) -> "ManagerAPI":
+        """
+        Run a daemon service in the background.
+
+        Equivalent to `run_child_service(..., daemon=True)`.
         """
         ...
 
@@ -199,11 +242,11 @@ class Manager(ManagerAPI):
 
     _service: ServiceAPI
 
-    _run_error: Optional[Tuple[
+    _errors: List[Tuple[
         Optional[Type[BaseException]],
         Optional[BaseException],
         Optional[TracebackType],
-    ]] = None
+    ]]
 
     # A nursery for system tasks.  This nursery is cancelled in the event that
     # the service is cancelled or exits.
@@ -228,6 +271,9 @@ class Manager(ManagerAPI):
 
         # locks
         self._run_lock = trio.Lock()
+
+        # errors
+        self._errors = []
 
     #
     # System Tasks
@@ -270,7 +316,7 @@ class Manager(ManagerAPI):
                 '%s: _handle_run got error, storing exception and setting cancelled',
                 self
             )
-            self._run_error = sys.exc_info()
+            self._errors.append(sys.exc_info())
             self.cancel()
         else:
             # NOTE: Any service which uses daemon tasks will need to trigger
@@ -298,34 +344,38 @@ class Manager(ManagerAPI):
 
         async with self._run_lock:
             async with trio.open_nursery() as system_nursery:
-                async with trio.open_nursery() as task_nursery:
-                    self._task_nursery = task_nursery
+                try:
+                    async with trio.open_nursery() as task_nursery:
+                        self._task_nursery = task_nursery
 
-                    system_nursery.start_soon(
-                        self._handle_cancelled,
-                        task_nursery,
-                    )
-                    system_nursery.start_soon(
-                        self._handle_stopped,
-                        system_nursery,
-                    )
+                        system_nursery.start_soon(
+                            self._handle_cancelled,
+                            task_nursery,
+                        )
+                        system_nursery.start_soon(
+                            self._handle_stopped,
+                            system_nursery,
+                        )
 
-                    task_nursery.start_soon(self._handle_run)
+                        task_nursery.start_soon(self._handle_run)
 
-                    self._started.set()
+                        self._started.set()
 
-                    # ***BLOCKING HERE***
-                    # The code flow will block here until the background tasks have
-                    # completed or cancellation occurs.
-
-                # Mark as having stopped
-                self._stopped.set()
+                        # ***BLOCKING HERE***
+                        # The code flow will block here until the background tasks have
+                        # completed or cancellation occurs.
+                finally:
+                    # Mark as having stopped
+                    self._stopped.set()
         self.logger.debug('%s stopped', self)
 
         # If an error occured, re-raise it here
         if self.did_error:
-            _, exc_value, exc_tb = self._run_error
-            raise exc_value.with_traceback(exc_tb)
+            raise trio.MultiError(tuple(
+                exc_value.with_traceback(exc_tb)
+                for _, exc_value, exc_tb
+                in self._errors
+            ))
 
     #
     # Event API mirror
@@ -336,7 +386,7 @@ class Manager(ManagerAPI):
 
     @property
     def is_running(self) -> bool:
-        return self._started.is_set() and not self._stopped.is_set()
+        return self.is_started and not self.is_stopped
 
     @property
     def is_cancelled(self) -> bool:
@@ -348,7 +398,7 @@ class Manager(ManagerAPI):
 
     @property
     def did_error(self) -> bool:
-        return self._run_error is not None
+        return len(self._errors) > 0
 
     #
     # Control API
@@ -389,15 +439,22 @@ class Manager(ManagerAPI):
                 err,
                 exc_info=True,
             )
+            self._errors.append(sys.exc_info())
+            self.cancel()
         else:
             self.logger.debug(
                 "task '%s[daemon=%s]' finished.",
                 name,
                 daemon,
             )
-        finally:
             if daemon:
+                self.logger.debug(
+                    "daemon task '%s' exited unexpectedly.  Cancelling service: %s",
+                    name,
+                    self,
+                )
                 self.cancel()
+                raise DaemonTaskExit(f"Daemon task {name} exited")
 
     def run_task(self,
                  async_fn: Callable[..., Awaitable[Any]],
@@ -415,6 +472,30 @@ class Manager(ManagerAPI):
             *args,
             name=name,
         )
+
+    def run_daemon_task(self,
+                        async_fn: Callable[..., Awaitable[Any]],
+                        *args: Any,
+                        name: str = None) -> None:
+
+        self.run_task(async_fn, *args, daemon=True, name=name)
+
+    def run_child_service(self,
+                          service: ServiceAPI,
+                          daemon: bool = False,
+                          name: str = None) -> "Manager":
+        child_manager = Manager(service)
+        self.run_task(
+            child_manager.run,
+            daemon=daemon,
+            name=name or repr(service)
+        )
+        return child_manager
+
+    def run_daemon_child_service(self,
+                                 service: ServiceAPI,
+                                 name: str = None) -> "Manager":
+        return self.run_child_service(service, daemon=True, name=name)
 
 
 @asynccontextmanager
